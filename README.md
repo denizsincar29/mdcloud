@@ -28,6 +28,12 @@ never send to a server.
 - **Creating a document** starts in the editor: your index page has a path
   field and a **Создать документ** button that opens mathmd on that address;
   `Ctrl+S` there creates the document in the cloud.
+- **The document list is a tree:** the folder is a heading (`/` for the cloud
+  root), the files sit under it by name alone, so a screen reader can jump
+  between folders by heading instead of listening to the same path prefix over
+  and over. The open document shows its full address and has a
+  **Переименовать** button next to it, which moves the document (content and
+  comments travel along, an occupied address answers `409`).
 - **Visibility** is per document: `public` or `private`, private is the default.
 - **Comments** can be anonymous (with a name you type) or from a logged-in user.
   A comment can point at a line of the document: `{line 5}` renders as a link
@@ -119,9 +125,18 @@ so a plain-http development setup still works.
 ## API
 
 Browser sessions ride in a cookie; scripts may use `Authorization: Bearer <token>`
-(the token from `login`/`register`) instead — both reach the same session table.
+instead — either the token from `login`/`register` (a session) or a permanent API
+key issued from the account menu (`POST /api/tokens`). A key is a hash in
+`api_tokens`, carries an optional expiry and can be revoked; it grants the same
+access as the account's password, so it is shown exactly once.
+
 State-changing requests authenticated by cookie must carry an allowed `Origin`
-and a JSON body (see *Security notes*).
+and a JSON body (see *Security notes*). Bearer requests are exempt: no cookie,
+and a foreign page cannot set the header.
+
+An assistant-readable walkthrough of the whole surface lives at
+`GET /api/llm.md` (public, `text/markdown`, embedded in the binary from
+`internal/api/llm.md`).
 
 | Method | Path | Who | What |
 | --- | --- | --- | --- |
@@ -131,9 +146,11 @@ and a JSON body (see *Security notes*).
 | `GET` | `/api/me` | signed in | current user and document count |
 | `GET` | `/api/config` | anyone | registration mode (`first`/`open`/`invite`/`closed`), cloud and editor URLs |
 | `GET` | `/api/docs` | signed in | all of your documents, private included |
+| `POST` | `/api/docs` | signed in | save `{path, content?, title?, public?, visibility?, …}` under the caller → `201` created / `200` updated |
 | `GET` | `/api/docs/{owner}` | anyone | that user's public documents |
 | `GET` | `/api/docs/{owner}/{path...}` | anyone | one document with its markdown |
 | `PUT` | `/api/docs/{owner}/{path...}` | owner | create/update `{title?, content?, visibility?, comments_on?, comments_require_auth?}` |
+| `PATCH` | `/api/docs/{owner}/{path...}` | owner | `{path}` — перенести на другой адрес (`409`, если адрес занят) |
 | `DELETE` | `/api/docs/{owner}/{path...}` | owner | soft delete |
 | `GET` | `/api/comments/{owner}/{path...}` | anyone | comments (private docs excluded) |
 | `POST` | `/api/comments/{owner}/{path...}` | anyone | `{body, name?}` — name is required when anonymous |
@@ -141,6 +158,10 @@ and a JSON body (see *Security notes*).
 | `GET` | `/api/invites` | admin | issued invites and their state (codes are never returned) |
 | `POST` | `/api/invites` | admin | `{note?, days?}` → `{code, url}` — shown once |
 | `DELETE` | `/api/invites/{id}` | admin | revoke an unspent invite |
+| `GET` | `/api/tokens` | signed in | your API keys (labels, terms, last use — never the keys) |
+| `POST` | `/api/tokens` | signed in | `{label?, days?}` → `{id, token, expires_at}` — value shown once; no `days` means forever |
+| `DELETE` | `/api/tokens/{id}` | signed in | revoke your key |
+| `GET` | `/api/llm.md` | anyone | how to use this API, written for assistants |
 | `GET` | `/api/health` | anyone | liveness |
 
 Paths are normalised: no leading slash, no `.`/`..` segments, at most 5 nested
@@ -198,12 +219,13 @@ to be somebody who can hand out codes.
 ```
 main.go                 wiring, startup, graceful shutdown
 internal/config         environment
-internal/models         users, docs, comments, sessions, invites
+internal/models         users, docs, comments, sessions, invites, API keys
 internal/store          Postgres connection, AutoMigrate
 internal/auth           bcrypt, tokens, invite codes
 internal/mdpath         document path rules
 internal/api            routes and handlers
-web/                    preview, login, registration, invites (static, served by Caddy)
+internal/api/llm.md     API guide for assistants, served at /api/llm.md
+web/                    preview, login, registration, invites, API keys (static, served by Caddy)
 web/md.mjs              markdown → HTML for the preview (frontmatter, AsciiMath)
 web/test/               page smoke test (jsdom) and markdown test (node)
 deploy.sh               build + database + systemd + Caddy, idempotent

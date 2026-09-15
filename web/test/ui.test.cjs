@@ -59,7 +59,10 @@ function makeApi(overrides = {}) {
     calls,
     fetch: async (url, init) => {
       const method = (init && init.method) || "GET";
-      const key = method + " " + url;
+      // Страница экранирует путь посегментно, а маршруты в тесте записаны
+      // как есть: сводим их вместе разбором процентов, иначе кириллический
+      // адрес не находил бы свою заглушку.
+      const key = method + " " + decodeURIComponent(url);
       calls.push({ key, init });
       const route = routes[key];
       if (!route) return { ok: false, status: 404, text: async () => '{"error":"нет такого маршрута: ' + key + '"}' };
@@ -153,7 +156,7 @@ async function main() {
       $("account-toggle").getAttribute("aria-expanded") === "true",
       $("account-toggle").getAttribute("aria-expanded"));
     ok("фокус встал на первый пункт меню",
-      w.document.activeElement === $("invites-toggle"), w.document.activeElement.id);
+      w.document.activeElement === $("tokens-toggle"), w.document.activeElement.id);
 
     key(w, "Escape");
     ok("Escape закрыл меню", $("account-menu").hidden === true);
@@ -187,6 +190,56 @@ async function main() {
     click(w, revoke);
     await tick();
     ok("отзыв ушёл в API", stub.calls.some((c) => c.key === "DELETE /api/invites/7"), JSON.stringify(stub.calls.map((c) => c.key)));
+  }
+
+  // --- 3б. API-токены: выписать, увидеть, отозвать ---------------------------
+  {
+    const api = makeApi({
+      "GET /api/me": () => ({ status: 200, body: { user: { username: "deniz", is_admin: true } } }),
+      "GET /api/tokens": () => ({
+        status: 200,
+        body: {
+          tokens: [
+            {
+              id: 9, label: "дайджест", state: "active",
+              created_at: "2026-09-15T10:00:00Z", expires_at: "2026-10-15T10:00:00Z",
+              last_used_at: null,
+            },
+          ],
+        },
+      }),
+      "POST /api/tokens": () => ({ status: 201, body: { id: 10, label: "вечный", token: "mdk-secret" } }),
+      "DELETE /api/tokens/9": () => ({ status: 200, body: { ok: true } }),
+    });
+    const { $, w, tick, stub } = await boot({ api });
+
+    click(w, $("account-toggle"));
+    click(w, $("tokens-toggle"));
+    await tick();
+    ok("открылся раздел ключей", !$("tokens").hidden);
+    ok("ключи запрошены", stub.calls.some((c) => c.key === "GET /api/tokens"));
+    ok("видно, для чего ключ", /дайджест/.test($("tokens-list").textContent), $("tokens-list").textContent);
+    ok("видно, что ключом ещё не пользовались",
+      /не пользовались/.test($("tokens-list").textContent), $("tokens-list").textContent);
+
+    $("token-label").value = "вечный";
+    $("token-days").value = "0";
+    submit(w, $("token-form"));
+    await tick();
+    const call = stub.calls.find((c) => c.key === "POST /api/tokens");
+    ok("ключ выписан через API", Boolean(call), JSON.stringify(stub.calls.map((c) => c.key)));
+    ok("в запросе срок 0 — бессрочный", call && call.init.body.includes('"days":0'), call && call.init.body);
+    ok("значение ключа показано один раз",
+      $("token-fresh").hidden === false && $("token-value").value === "mdk-secret", $("token-value").value);
+    ok("сказано скопировать ключ сейчас",
+      /скопируйте/.test($("status").textContent), $("status").textContent);
+
+    const revoke = [...w.document.querySelectorAll("#tokens-list button")][0];
+    ok("у ключа есть кнопка отзыва", Boolean(revoke), $("tokens-list").innerHTML);
+    click(w, revoke);
+    await tick();
+    ok("отзыв ключа ушёл в API",
+      stub.calls.some((c) => c.key === "DELETE /api/tokens/9"), JSON.stringify(stub.calls.map((c) => c.key)));
   }
 
   // --- 4. Ошибка сервера показывается текстом --------------------------------
@@ -271,7 +324,7 @@ async function main() {
     w.HTMLAnchorElement.prototype.click = function () {
       opened.push(this.getAttribute("href"));
     };
-    const li = $("index-list").querySelector("li");
+    const li = $("index-list").querySelector("li.folder > ul > li");
     const a = li.querySelector("a");
     ok("в списке есть ссылка", Boolean(a), $("index-list").innerHTML);
 
@@ -281,6 +334,108 @@ async function main() {
 
     click(w, a);
     ok("клик по самой ссылке переход не удваивает", opened.length === 1, JSON.stringify(opened));
+  }
+
+  // --- 8б. Список документов — деревом: папка заголовком, файлы под ней ------
+  {
+    const api = makeApi({
+      "GET /api/me": () => ({ status: 200, body: { user: { username: "deniz", is_admin: true } } }),
+      "GET /api/docs/deniz": () => ({
+        status: 200,
+        body: {
+          docs: [
+            { path: "заметки", title: "заметки", visibility: "public" },
+            { path: "сафу/мо/лаб1", title: "лаб1", visibility: "private" },
+            { path: "сафу/мо/лаб2", title: "лаб2", visibility: "public" },
+            { path: "сафу/ии/конспект", title: "конспект", visibility: "public" },
+          ],
+        },
+      }),
+    });
+    const { $ } = await boot({ api });
+    const list = $("index-list");
+    const heads = [...list.querySelectorAll("h2")].map((h) => h.textContent);
+    ok("папки стали заголовками, корень — первым", heads.join(", ") === "/, сафу/ии, сафу/мо", heads.join(", "));
+    const groups = [...list.querySelectorAll("li.folder")].map((g) => ({
+      head: g.querySelector("h2").textContent,
+      names: [...g.querySelectorAll("ul > li > a")].map((a) => a.textContent),
+    }));
+    ok("в папке видны только имена файлов, без пути",
+      groups[0].names.join(",") === "заметки" && groups[2].names.join(",") === "лаб1,лаб2",
+      JSON.stringify(groups));
+    ok("закрытость помечена у нужного файла",
+      /закрытый/.test(list.querySelectorAll("li.folder")[2].querySelectorAll("li")[0].textContent),
+      list.innerHTML);
+    const hrefs = [...list.querySelectorAll("a")].map((a) => decodeURIComponent(a.getAttribute("href")));
+    ok("ссылки ведут на полный адрес документа",
+      hrefs.join(", ") === "/deniz/заметки, /deniz/сафу/ии/конспект, /deniz/сафу/мо/лаб1, /deniz/сафу/мо/лаб2",
+      hrefs.join(", "));
+  }
+
+  // --- 8в. Переименование: кнопка, новый путь, PATCH --------------------------
+  {
+    const doc = {
+      owner: "deniz", path: "сафу/мо/лаб1", title: "лаб1",
+      content: "текст", visibility: "public", updated_at: "2026-09-15T10:00:00Z", can_edit: true,
+    };
+    const api = makeApi({
+      "GET /api/me": () => ({ status: 200, body: { user: { username: "deniz", is_admin: true } } }),
+      "GET /api/docs/deniz/сафу/мо/лаб1": () => ({ status: 200, body: doc }),
+      "GET /api/comments/deniz/сафу/мо/лаб1": () => ({
+        status: 200,
+        body: { comments: [], comments_on: true, can_comment: true, require_auth: false, viewer_authenticated: true },
+      }),
+      "PATCH /api/docs/deniz/сафу/мо/лаб1": () => ({
+        status: 200,
+        body: { ...doc, path: "сафу/мо/лаб3", title: "лаб3" },
+      }),
+      "GET /api/docs/deniz/сафу/мо/лаб3": () => ({
+        status: 200, body: { ...doc, path: "сафу/мо/лаб3", title: "лаб3" },
+      }),
+      "GET /api/comments/deniz/сафу/мо/лаб3": () => ({
+        status: 200,
+        body: { comments: [], comments_on: true, can_comment: true, require_auth: false, viewer_authenticated: true },
+      }),
+    });
+    const { $, w, tick } = await boot({ path: "/deniz/сафу/мо/лаб1", api });
+    ok("кнопка переименования видна хозяину", $("rename-toggle").hidden === false);
+    ok("форма переименования спрятана, пока её не позвали", $("rename-form").hidden === true);
+    ok("в шапке документа виден адрес", /Адрес: deniz\/сафу\/мо\/лаб1/.test($("doc-meta").textContent), $("doc-meta").textContent);
+
+    click(w, $("rename-toggle"));
+    ok("кнопка раскрыла форму", $("rename-form").hidden === false);
+    ok("поле заполнено текущим адресом", $("rename-path").value === "сафу/мо/лаб1", $("rename-path").value);
+
+    $("rename-path").value = " сафу/мо/лаб3 ";
+    submit(w, $("rename-form"));
+    await tick(); // PATCH, затем перерисовка документа по новому адресу
+    await tick();
+    const call = api.calls.find((c) => c.key.startsWith("PATCH "));
+    ok("перенос ушёл в API методом PATCH", Boolean(call), JSON.stringify(api.calls.map((c) => c.key)));
+    ok("в теле новый путь, без пробелов", call && call.init.body.includes('"path":"сафу/мо/лаб3"'), call && call.init.body);
+    ok("после переноса открылся новый адрес", /лаб3/.test($("doc-title").textContent), $("doc-title").textContent);
+    ok("сказано, что документ перенесён", /перенесён/.test($("status").textContent), $("status").textContent);
+  }
+
+  // --- 8г. Вошедшему про подпись не напоминают --------------------------------
+  {
+    const api = makeApi({
+      "GET /api/me": () => ({ status: 200, body: { user: { username: "deniz", is_admin: true } } }),
+      "GET /api/docs/deniz/lab1": () => ({
+        status: 200,
+        body: {
+          owner: "deniz", path: "lab1", title: "Лаба", content: "текст",
+          visibility: "public", updated_at: "2026-09-15T10:00:00Z", can_edit: true,
+        },
+      }),
+      "GET /api/comments/deniz/lab1": () => ({
+        status: 200,
+        body: { comments: [], comments_on: true, can_comment: true, require_auth: false, viewer_authenticated: true },
+      }),
+    });
+    const { $ } = await boot({ path: "/deniz/lab1", api });
+    ok("поля подписи у вошедшего нет", $("comment-name-row").hidden === true);
+    ok("и подсказки про подпись тоже нет", $("comment-hint").textContent === "", $("comment-hint").textContent);
   }
 
   // --- 9. Комментарий ссылается на строку документа --------------------------

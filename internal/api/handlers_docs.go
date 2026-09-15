@@ -212,6 +212,84 @@ func (s *Server) putDoc(w http.ResponseWriter, r *http.Request, u *models.User) 
 	s.saveDoc(w, u, owner, path, &in, http.StatusOK)
 }
 
+// moveDoc переносит документ на другой адрес: PATCH с новым путём в теле.
+//
+// Переезд — это один UPDATE поля path, а не перезапись содержимого: строка
+// документа остаётся той же, поэтому комментарии (они ссылаются на DocID)
+// едут вместе с ним, и ничего не теряется по дороге. Отдельный метод, а не
+// POST по новому адресу, ещё и потому, что POST по новому адресу затёр бы
+// документ, который там уже лежит.
+func (s *Server) moveDoc(w http.ResponseWriter, r *http.Request, u *models.User) {
+	owner, ok := s.findUser(r.PathValue("owner"))
+	if !ok {
+		writeErr(w, http.StatusNotFound, "нет такого пользователя")
+		return
+	}
+	from, err := mdpath.Normalize(r.PathValue("path"))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	var in struct {
+		Path *string `json:"path"`
+	}
+	if !decodeJSON(w, r, &in, 8192) {
+		return
+	}
+	if in.Path == nil || strings.TrimSpace(*in.Path) == "" {
+		writeErr(w, http.StatusBadRequest, "не назван новый путь")
+		return
+	}
+	to, err := mdpath.Normalize(*in.Path)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	var doc models.Doc
+	err = s.db.Where("owner_id = ? AND path = ?", owner.ID, from).First(&doc).Error
+	switch {
+	case errors.Is(err, gorm.ErrRecordNotFound):
+		writeErr(w, http.StatusNotFound, "нет такого документа")
+		return
+	case err != nil:
+		writeErr(w, http.StatusInternalServerError, "база недоступна")
+		return
+	}
+	if owner.ID != u.ID {
+		writeErr(w, http.StatusForbidden, "переносить можно только свои документы")
+		return
+	}
+	if to == from {
+		writeJSON(w, http.StatusOK, s.viewDoc(&doc, owner.Username, u, true))
+		return
+	}
+
+	var taken int64
+	if err := s.db.Model(&models.Doc{}).
+		Where("owner_id = ? AND path = ?", owner.ID, to).Count(&taken).Error; err != nil {
+		writeErr(w, http.StatusInternalServerError, "база недоступна")
+		return
+	}
+	if taken > 0 {
+		writeErr(w, http.StatusConflict, "по адресу "+to+" уже есть документ")
+		return
+	}
+
+	// Заголовок, оставшийся от старого имени (то есть не свой), едет с
+	// документом: иначе после переименования файла в списке висело бы
+	// прежнее имя, и завести своё человеку пришлось бы отдельно.
+	if doc.Title == defaultTitle(from) {
+		doc.Title = defaultTitle(to)
+	}
+	doc.Path = to
+	if err := s.db.Save(&doc).Error; err != nil {
+		writeErr(w, http.StatusInternalServerError, "не смог перенести документ")
+		return
+	}
+	writeJSON(w, http.StatusOK, s.viewDoc(&doc, owner.Username, u, true))
+}
+
 // saveDoc — общий путь записи: проверки, создание или обновление, ответ. Им
 // пользуются и PUT по адресу, и POST с путём в теле.
 //

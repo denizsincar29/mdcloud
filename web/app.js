@@ -22,6 +22,7 @@ const state = {
   renderers: null,
   config: null, // что сервер рассказал про регистрацию
   invites: [],
+  tokens: [],
   invite: "", // код из ссылки-приглашения, с которой пришёл человек
 };
 
@@ -38,6 +39,35 @@ function editorUrl(base, owner, path) {
 // Наружу — нарочно: страница живёт одним файлом без модулей, и это
 // единственный способ проверить сборку адреса тестом (web/test/ui.test.cjs).
 window.mdcloudEditorUrl = editorUrl;
+
+// cleanPath приводит путь к тому виду, который примет сервер: пробелы и
+// лишние слэши он отвергает, поэтому чистим здесь, а не отказом потом.
+function cleanPath(raw) {
+  return (raw || "").trim()
+    .replace(/^\/+/, "")
+    .replace(/\s+/g, "-")
+    .split("/")
+    .filter(Boolean)
+    .join("/");
+}
+
+// docHref — адрес документа на сайте: владелец и каждый сегмент пути
+// экранируются по отдельности (в именах бывает кириллица и «/» в сегменте).
+function docHref(owner, path) {
+  return "/" + ownerPath("", owner, path);
+}
+
+// ownerPath — «<префикс><владелец>/<путь>» с экранированием по сегментам:
+// один и тот же адрес собирается и для страницы, и для API, и для комментов.
+function ownerPath(prefix, owner, path) {
+  return prefix + encodeURIComponent(owner) + "/" +
+    path.split("/").map(encodeURIComponent).join("/");
+}
+
+// apiPath — адрес документа в API.
+function apiPath(owner, path) {
+  return ownerPath("/api/docs/", owner, path);
+}
 
 function status(text) {
   el("status").textContent = text || "";
@@ -394,13 +424,14 @@ function paintAuth() {
   toggle.hidden = !logged;
   toggle.textContent = logged ? "Учётная запись: " + state.user.username : "Учётная запись";
   el("login-toggle").hidden = logged;
+  el("tokens-toggle").hidden = !logged;
   el("invites-toggle").hidden = !(logged && state.user.is_admin);
   if (!logged) closeAccountMenu();
 }
 
 // ------------------------------------------------------------------ экраны
 
-const SCREENS = ["login", "register", "index", "doc", "invites"];
+const SCREENS = ["login", "register", "index", "doc", "invites", "tokens"];
 
 function show(id) {
   for (const name of SCREENS) el(name).hidden = name !== id;
@@ -455,6 +486,30 @@ async function openRegister(invite) {
   el("register-name").focus();
 }
 
+// docRow собирает строку списка: имя файла без папки — сама папка стоит
+// заголовком над ним. Ссылка остаётся ссылкой, но нажать можно и мимо её
+// текста: так до пункта доходит чтец экрана, который в режиме обзора
+// попадает на пункт списка, а не на ссылку внутри него.
+function docRow(owner, doc, folder) {
+  const li = document.createElement("li");
+  const a = document.createElement("a");
+  a.href = docHref(owner, doc.path);
+  const leaf = folder === "/" ? doc.path : doc.path.slice(folder.length + 1);
+  a.textContent = doc.title || leaf;
+  li.append(a);
+  if (doc.visibility !== "public") {
+    const mark = document.createElement("span");
+    mark.className = "meta";
+    mark.textContent = " — закрытый";
+    li.append(mark);
+  }
+  li.addEventListener("click", (event) => {
+    if (event.target.closest("a")) return; // по ссылке — обычный переход
+    a.click();
+  });
+  return li;
+}
+
 async function openIndex(owner) {
   show("index");
   // Завести документ можно только у себя: у чужого списка формы нет.
@@ -466,26 +521,33 @@ async function openIndex(owner) {
   document.title = "Документы: " + owner + " — mdcloud";
   const list = el("index-list");
   list.replaceChildren();
+
+  // Документы лежат по папкам, и в списке это видно: папка — заголовок,
+  // под ним имена файлов. Путь целиком в каждой строке читать тяжело
+  // (все строки начинаются одинаково), а по заголовкам папок чтец экрана
+  // ходит с клавиатуры одним нажатием. «/» — документы в корне облака.
+  const folders = new Map();
   for (const doc of data.docs) {
-    const li = document.createElement("li");
-    const a = document.createElement("a");
-    a.href = "/" + owner + "/" + doc.path.split("/").map(encodeURIComponent).join("/");
-    a.textContent = doc.title || doc.path;
-    li.append(a);
-    if (doc.visibility !== "public") {
-      const mark = document.createElement("span");
-      mark.className = "meta";
-      mark.textContent = " — закрытый";
-      li.append(mark);
-    }
-    // Ссылка остаётся ссылкой, но попасть по ней можно и мимо текста: клик по
-    // всей строке списка нажимает на неё. Так до неё доходит и чтец экрана,
-    // который в режиме обзора попадает на пункт списка, а не на ссылку.
-    li.addEventListener("click", (event) => {
-      if (event.target.closest("a")) return; // по ссылке — обычный переход
-      a.click();
-    });
-    list.append(li);
+    const cut = doc.path.lastIndexOf("/");
+    const folder = cut < 0 ? "/" : doc.path.slice(0, cut);
+    if (!folders.has(folder)) folders.set(folder, []);
+    folders.get(folder).push(doc);
+  }
+  const order = [...folders.keys()].sort((a, b) => {
+    if (a === "/") return b === "/" ? 0 : -1; // корень — первым
+    if (b === "/") return 1;
+    return a.localeCompare(b, "ru");
+  });
+  for (const folder of order) {
+    const group = document.createElement("li");
+    group.className = "folder";
+    const head = document.createElement("h2");
+    head.textContent = folder;
+    const inner = document.createElement("ul");
+    inner.className = "doclist";
+    for (const doc of folders.get(folder)) inner.append(docRow(owner, doc, folder));
+    group.append(head, inner);
+    list.append(group);
   }
   if (!data.docs.length) {
     const li = document.createElement("li");
@@ -498,14 +560,13 @@ async function openIndex(owner) {
 
 async function openDoc(owner, path) {
   show("doc");
-  const doc = await api("/api/docs/" + encodeURIComponent(owner) + "/" +
-    path.split("/").map(encodeURIComponent).join("/"));
+  const doc = await api(apiPath(owner, path));
   state.doc = doc;
 
   el("doc-title").textContent = doc.title || doc.path;
   document.title = (doc.title || doc.path) + " — mdcloud";
   el("doc-meta").textContent = [
-    owner,
+    "Адрес: " + owner + "/" + doc.path,
     doc.visibility === "public" ? "публичный" : "закрытый",
     "обновлён " + new Date(doc.updated_at).toLocaleString("ru-RU"),
   ].join(" · ");
@@ -524,6 +585,8 @@ async function openDoc(owner, path) {
 
   el("edit").hidden = !doc.can_edit;
   el("toggle-vis").hidden = !doc.can_edit;
+  el("rename-toggle").hidden = !doc.can_edit;
+  el("rename-form").hidden = true;
   if (doc.can_edit) {
     el("toggle-vis").textContent =
       doc.visibility === "public" ? "Сделать закрытым" : "Сделать публичным";
@@ -534,8 +597,7 @@ async function openDoc(owner, path) {
 }
 
 async function loadComments(owner, doc) {
-  const base = "/api/comments/" + encodeURIComponent(owner) + "/" +
-    doc.path.split("/").map(encodeURIComponent).join("/");
+  const base = ownerPath("/api/comments/", owner, doc.path);
   const data = await api(base);
   const list = el("comments");
   list.replaceChildren();
@@ -573,10 +635,12 @@ async function loadComments(owner, doc) {
   const form = el("comment-form");
   form.hidden = !data.can_comment;
   el("comment-closed").hidden = data.comments_on;
-  el("comment-hint").textContent = data.require_auth
-    ? "Здесь пишут только вошедшие."
-    : data.viewer_authenticated
-      ? "Вы вошли — подпись возьмётся сама."
+  // Вошедшему подсказывать нечего: подпись берётся из аккаунта, а поле имени
+  // ему не показывают. Пояснения — только тем, кто пишет без входа.
+  el("comment-hint").textContent = data.viewer_authenticated
+    ? ""
+    : data.require_auth
+      ? "Здесь пишут только вошедшие."
       : "Можно писать без входа, но представьтесь.";
   el("comment-name-row").hidden = data.viewer_authenticated;
   form.dataset.base = base;
@@ -628,6 +692,63 @@ async function openInvites() {
   el("main").focus();
 }
 
+// ------------------------------------------------------------------ ключи
+
+// Ключи аккаунта: выписать, посмотреть, отозвать. Срок выбирают при выдаче —
+// бессрочный ключ удобно положить в скрипт, который ходит в облако каждый день.
+// Само значение ключа страница видит один раз: в облаке лежит только отпечаток.
+async function openTokens() {
+  show("tokens");
+  status("");
+  await paintTokens();
+  el("main").focus();
+}
+
+function paintTokens() {
+  return api("/api/tokens").then((data) => {
+    state.tokens = data.tokens || [];
+    const list = el("tokens-list");
+    list.replaceChildren();
+    for (const tok of state.tokens) list.append(tokenRow(tok));
+    if (!state.tokens.length) {
+      const li = document.createElement("li");
+      li.className = "meta";
+      li.textContent = "Ключей пока нет.";
+      list.append(li);
+    }
+  });
+}
+
+function tokenRow(tok) {
+  const li = document.createElement("li");
+  const name = tok.label ? tok.label : "без пометки";
+  const until = tok.expires_at
+    ? (tok.state === "expired" ? "просрочен " : "действует до ") +
+      new Date(tok.expires_at).toLocaleDateString("ru-RU")
+    : "бессрочный";
+  const used = tok.last_used_at
+    ? "им пользовались " + new Date(tok.last_used_at).toLocaleString("ru-RU")
+    : "им ещё не пользовались";
+  const head = document.createElement("p");
+  head.textContent = `${name} — ${until}, ${used}`;
+  li.append(head);
+
+  const del = document.createElement("button");
+  del.type = "button";
+  del.textContent = `Отозвать ключ ${name}`;
+  del.addEventListener("click", async () => {
+    try {
+      await api("/api/tokens/" + tok.id, { method: "DELETE" });
+      await paintTokens();
+      status("Ключ отозван — скрипт им больше не войдёт.");
+    } catch (err) {
+      fail(err);
+    }
+  });
+  li.append(del);
+  return li;
+}
+
 // ------------------------------------------------------------------ маршрут
 
 function route() {
@@ -643,6 +764,10 @@ async function render() {
   try {
     if (location.hash === "#invites" && state.user && state.user.is_admin) {
       await openInvites();
+      return;
+    }
+    if (location.hash === "#tokens" && state.user) {
+      await openTokens();
       return;
     }
     if (r.kind === "home") {
@@ -677,6 +802,11 @@ document.addEventListener("click", (event) => {
   if (!accountMenuOpen()) return;
   if (event.target.closest && (event.target.closest("#account-menu") || event.target.closest("#account-toggle"))) return;
   closeAccountMenu();
+});
+el("tokens-toggle").addEventListener("click", () => {
+  closeAccountMenu();
+  location.hash = "#tokens";
+  render();
 });
 el("invites-toggle").addEventListener("click", () => {
   closeAccountMenu();
@@ -768,6 +898,32 @@ el("invites-back").addEventListener("click", () => {
   render();
 });
 
+el("token-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  status("Выписываю ключ…");
+  try {
+    const out = await api("/api/tokens", {
+      method: "POST",
+      body: { label: el("token-label").value, days: Number(el("token-days").value) || 0 },
+    });
+    el("token-label").value = "";
+    await paintTokens();
+    // Ключ показывается один раз: в базе лежит только его отпечаток.
+    el("token-fresh").hidden = false;
+    el("token-value").value = out.token;
+    status("Ключ готов — скопируйте его сейчас: потом посмотреть не получится.");
+    el("token-value").focus();
+    el("token-value").select();
+  } catch (err) {
+    fail(err);
+  }
+});
+
+el("tokens-back").addEventListener("click", () => {
+  location.hash = "";
+  render();
+});
+
 // openInEditor уводит в mathmd на документе owner/path. Путь едет во фрагменте
 // адреса: редактор читает его и сам идёт в API — с той же кукой, что уже
 // есть у браузера. Если документа ещё нет, редактор откроет пустой лист с
@@ -787,27 +943,62 @@ el("edit").addEventListener("click", () => {
 
 el("new-doc-form").addEventListener("submit", (event) => {
   event.preventDefault();
-  // Путь чистим так же, как редактор при сохранении: пробелы и лишние слэши
-  // сервер не примет, поэтому приводим адрес в порядок здесь, а не отказом
-  // потом, когда человек уже написал документ.
-  const path = el("new-doc-path").value.trim()
-    .replace(/^\/+/, "")
-    .replace(/\s+/g, "-")
-    .split("/")
-    .filter(Boolean)
-    .join("/");
+  const path = cleanPath(el("new-doc-path").value);
   if (!path) return;
   openInEditor(event.currentTarget.dataset.owner, path);
+});
+
+// Переименование — это перенос по адресу: содержимое и комментарии остаются
+// на месте, меняется только путь. Поле показываем по кнопке, чтобы оно не
+// стояло поперёк документа, и заполняем текущим адресом — так его видно, и
+// править можно кусок, а не набирать путь заново.
+el("rename-toggle").addEventListener("click", () => {
+  const form = el("rename-form");
+  form.hidden = !form.hidden;
+  if (form.hidden) return;
+  el("rename-path").value = state.doc.path;
+  el("rename-path").focus();
+  el("rename-path").select();
+  status("Новый адрес документа. Enter — перенести, Отмена — оставить как было.");
+});
+
+el("rename-cancel").addEventListener("click", () => {
+  el("rename-form").hidden = true;
+  el("rename-toggle").focus();
+  status("Адрес не менялся.");
+});
+
+el("rename-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const owner = state.doc.owner;
+  const from = state.doc.path;
+  const to = cleanPath(el("rename-path").value);
+  if (!to) {
+    status("Напишите новый адрес.");
+    return;
+  }
+  if (to === from) {
+    el("rename-form").hidden = true;
+    status("Адрес тот же — переносить нечего.");
+    return;
+  }
+  try {
+    const doc = await api(apiPath(owner, from), { method: "PATCH", body: { path: to } });
+    // Адрес страницы тоже переезжает: иначе F5 вернул бы старую ссылку, и
+    // «скопировать адрес» из браузера отдал бы документ по старому пути.
+    history.replaceState(null, "", docHref(owner, doc.path));
+    await openDoc(owner, doc.path);
+    status("Документ перенесён: " + doc.path);
+  } catch (err) {
+    fail(err);
+  }
 });
 
 el("toggle-vis").addEventListener("click", async () => {
   const next = state.doc.visibility === "public" ? "private" : "public";
   try {
-    const doc = await api(
-      "/api/docs/" + encodeURIComponent(state.doc.owner) + "/" +
-        state.doc.path.split("/").map(encodeURIComponent).join("/"),
-      { method: "PUT", body: { visibility: next } }
-    );
+    const doc = await api(apiPath(state.doc.owner, state.doc.path),
+      { method: "PUT", body: { visibility: next } });
     state.doc = doc;
     status(next === "public" ? "Документ открыт для всех." : "Документ закрыт.");
     await openDoc(doc.owner, doc.path);

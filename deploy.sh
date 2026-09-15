@@ -365,6 +365,12 @@ $DOMAIN {
 
 	handle {
 		root * $STATIC_DEST
+		# Статика не должна залипать в браузере: страница облака живёт одной
+		# вкладкой неделями, и старая копия скрипта молча ломает свежие правки.
+		# no-cache (не no-store) оставляет копию, но обязывает спросить сервер.
+		# «/» здесь тоже: try_files отдаёт по нему index.html.
+		@nocache path / *.js *.mjs *.html *.css
+		header @nocache Cache-Control "no-cache"
 		try_files {path} /index.html
 		file_server
 	}

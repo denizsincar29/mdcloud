@@ -184,6 +184,89 @@ func TestPostDocSavesUnderAccount(t *testing.T) {
 	}
 }
 
+// Перенос документа меняет адрес, но не содержимое: текст и комментарии
+// остаются те же, потому что строка документа та же. Проверяем и отказы —
+// занятый адрес, чужой документ, мусор в пути.
+func TestMoveDoc(t *testing.T) {
+	srv := newTestServer(t)
+	tok := register(t, srv, "deniz", "parol1234")
+
+	st, doc := req(t, srv, "POST", "/api/docs", tok,
+		map[string]any{"path": "ДЗ/ИИ/задачи", "content": "# Задачи\n", "public": true})
+	if st != http.StatusCreated {
+		t.Fatalf("создание документа: %d %v", st, doc)
+	}
+	id := doc["id"]
+	if st, c := req(t, srv, "POST", "/api/comments/deniz/ДЗ/ИИ/задачи", "",
+		map[string]any{"body": "ссылка {line 2}", "name": "Гость"}); st != http.StatusCreated {
+		t.Fatalf("комментарий: %d %v", st, c)
+	}
+
+	// Заголовок по умолчанию едет вместе с документом: иначе в списке
+	// висело бы старое имя файла.
+	st, moved := req(t, srv, "PATCH", "/api/docs/deniz/ДЗ/ИИ/задачи", tok,
+		map[string]any{"path": "сафу/мо/задачи"})
+	if st != http.StatusOK {
+		t.Fatalf("перенос: %d %v", st, moved)
+	}
+	if moved["path"] != "сафу/мо/задачи" || moved["title"] != "задачи" {
+		t.Errorf("после переноса путь и заголовок: %v", moved)
+	}
+	if moved["id"] != id {
+		t.Errorf("перенос завёл новый документ: был %v, стал %v", id, moved["id"])
+	}
+	if moved["visibility"] != "public" || moved["content"] != "# Задачи\n" {
+		t.Errorf("перенос потерял содержимое или видимость: %v", moved)
+	}
+	if st, _ := req(t, srv, "GET", "/api/docs/deniz/ДЗ/ИИ/задачи", "", nil); st != http.StatusNotFound {
+		t.Errorf("старый адрес отвечает после переноса: %d", st)
+	}
+	// Комментарии ссылаются на документ, а не на путь: они едут с ним.
+	st, cs := req(t, srv, "GET", "/api/comments/deniz/сафу/мо/задачи", "", nil)
+	if st != http.StatusOK {
+		t.Fatalf("комментарии по новому адресу: %d %v", st, cs)
+	}
+	if list, _ := cs["comments"].([]any); len(list) != 1 {
+		t.Errorf("после переноса комментариев %d, ждали 1: %v", len(list), cs)
+	}
+
+	// Занятый адрес не затираем и про перенос на себя не ругаемся.
+	if st, _ := req(t, srv, "POST", "/api/docs", tok,
+		map[string]any{"path": "заметки", "content": "чужое место"}); st != http.StatusCreated {
+		t.Fatalf("второй документ: %d", st)
+	}
+	if st, _ := req(t, srv, "PATCH", "/api/docs/deniz/сафу/мо/задачи", tok,
+		map[string]any{"path": "заметки"}); st != http.StatusConflict {
+		t.Errorf("перенос на занятый адрес: %d, ждали 409", st)
+	}
+	if st, same := req(t, srv, "PATCH", "/api/docs/deniz/сафу/мо/задачи", tok,
+		map[string]any{"path": "сафу/мо/задачи"}); st != http.StatusOK || same["path"] != "сафу/мо/задачи" {
+		t.Errorf("перенос на себя: %d %v", st, same)
+	}
+
+	// Отказы: пустой путь, выход наверх, несуществующий документ, чужой.
+	if st, _ := req(t, srv, "PATCH", "/api/docs/deniz/сафу/мо/задачи", tok,
+		map[string]any{"path": "  "}); st != http.StatusBadRequest {
+		t.Errorf("пустой новый путь: %d, ждали 400", st)
+	}
+	if st, _ := req(t, srv, "PATCH", "/api/docs/deniz/сафу/мо/задачи", tok,
+		map[string]any{"path": "../вверх"}); st != http.StatusBadRequest {
+		t.Errorf("новый путь с выходом наверх: %d, ждали 400", st)
+	}
+	if st, _ := req(t, srv, "PATCH", "/api/docs/deniz/нет-такого", tok,
+		map[string]any{"path": "куда-то"}); st != http.StatusNotFound {
+		t.Errorf("перенос несуществующего: %d, ждали 404", st)
+	}
+	if st, _ := req(t, srv, "PATCH", "/api/docs/deniz/сафу/мо/задачи", "", nil); st != http.StatusUnauthorized {
+		t.Errorf("перенос без входа: %d, ждали 401", st)
+	}
+	other := register(t, srv, "vasilisa", "parol1234")
+	if st, _ := req(t, srv, "PATCH", "/api/docs/deniz/сафу/мо/задачи", other,
+		map[string]any{"path": "моё/себе"}); st != http.StatusForbidden {
+		t.Errorf("перенос чужого документа: %d, ждали 403", st)
+	}
+}
+
 // Инструкция для ассистентов отдаётся без входа: тот, у кого ещё нет ключа,
 // должен прочитать, как его выписать. Тело — markdown, поэтому читаем ответ
 // сырым, а не через JSON-разбор.

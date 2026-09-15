@@ -51,6 +51,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/docs/{owner}", s.listByOwner)
 	mux.HandleFunc("GET /api/docs/{owner}/{path...}", s.getDoc)
 	mux.HandleFunc("PUT /api/docs/{owner}/{path...}", s.requireUser(s.putDoc))
+	mux.HandleFunc("PATCH /api/docs/{owner}/{path...}", s.requireUser(s.moveDoc))
 	mux.HandleFunc("DELETE /api/docs/{owner}/{path...}", s.requireUser(s.deleteDoc))
 
 	mux.HandleFunc("GET /api/tokens", s.requireUser(s.listTokens))
@@ -111,7 +112,7 @@ func (s *Server) cors(next http.Handler) http.Handler {
 				w.Header().Set("Access-Control-Allow-Origin", origin)
 				w.Header().Set("Access-Control-Allow-Credentials", "true")
 				w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
-				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 				w.Header().Set("Access-Control-Max-Age", "600")
 			}
 		}

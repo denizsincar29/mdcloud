@@ -13,6 +13,7 @@
   <nav aria-label="Учётная запись">
     <button id="account-toggle" type="button" aria-expanded="false" aria-controls="account-menu" hidden>Учётная запись</button>
     <div id="account-menu" hidden>
+      <button id="tokens-toggle" type="button" hidden>API-токены</button>
       <button id="invites-toggle" type="button" hidden>Приглашения</button>
       <button id="logout" type="button">Выйти</button>
     </div>
@@ -72,6 +73,31 @@
     <p class="actions"><button id="invites-back" type="button">К документам</button></p>
   </section>
 
+  <section id="tokens" hidden aria-labelledby="tokens-h">
+    <h1 id="tokens-h">API-токены</h1>
+    <p class="meta">Ключ нужен тому, кто работает с облаком не из браузера: скрипту, пайплайну,
+      ассистенту. Он ходит заголовком Authorization: Bearer и даёт полный доступ к аккаунту.
+      Значение ключа показывается один раз — в облаке лежит только его отпечаток, поэтому
+      скопируйте ключ сразу. Потеряли — выпишите новый, а старый отзовите.</p>
+    <form id="token-form">
+      <label for="token-label">Для чего ключ — для памяти</label>
+      <input id="token-label" name="label" maxlength="120" placeholder="дайджест">
+      <label for="token-days">Срок</label>
+      <select id="token-days" name="days">
+        <option value="1">день</option>
+        <option value="30" selected>месяц</option>
+        <option value="0">бессрочно</option>
+      </select>
+      <button type="submit">Выписать ключ</button>
+    </form>
+    <p id="token-fresh" hidden>
+      <label for="token-value">Ключ — скопируйте его сейчас</label>
+      <input id="token-value" readonly>
+    </p>
+    <ul id="tokens-list" class="doclist"></ul>
+    <p class="actions"><button id="tokens-back" type="button">К документам</button></p>
+  </section>
+
   <section id="index" hidden aria-labelledby="index-h">
     <h1 id="index-h">Документы</h1>
     <form id="new-doc-form" hidden>
@@ -88,7 +114,14 @@
     <p class="actions">
       <button id="edit" type="button" hidden>Редактировать</button>
       <button id="toggle-vis" type="button" hidden></button>
+      <button id="rename-toggle" type="button" hidden>Переименовать</button>
     </p>
+    <form id="rename-form" hidden>
+      <label for="rename-path">Новый адрес документа — путь в облаке</label>
+      <input id="rename-path" name="path" autocomplete="off" required>
+      <button type="submit">Перенести</button>
+      <button id="rename-cancel" type="button">Отмена</button>
+    </form>
     <article id="doc-body" class="markdown"></article>
 
     <section id="comments-block" aria-labelledby="comments-h">
