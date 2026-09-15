@@ -366,8 +366,8 @@ async function main() {
     ok("в папке видны только имена файлов, без пути",
       groups[0].names.join(",") === "заметки" && groups[2].names.join(",") === "лаб1,лаб2",
       JSON.stringify(groups));
-    ok("закрытость помечена у нужного файла",
-      /закрытый/.test(list.querySelectorAll("li.folder")[2].querySelectorAll("li")[0].textContent),
+    ok("приватность помечена у нужного файла",
+      /приватный/.test(list.querySelectorAll("li.folder")[2].querySelectorAll("li")[0].textContent),
       list.innerHTML);
     // Документ на срок помечен в списке: иначе он возьмёт и пропадёт незаметно.
     const until = new Date(soon).toLocaleDateString("ru-RU");

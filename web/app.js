@@ -557,7 +557,7 @@ function docRow(owner, doc, folder) {
   if (doc.visibility !== "public") {
     const mark = document.createElement("span");
     mark.className = "meta";
-    mark.textContent = " — закрытый";
+    mark.textContent = " — приватный";
     li.append(mark);
   }
   // Документ на срок помечаем в списке: иначе о нём не вспомнить, а он возьмёт
@@ -632,7 +632,7 @@ async function openDoc(owner, path) {
   document.title = (doc.title || doc.path) + " — mdcloud";
   el("doc-meta").textContent = [
     "Адрес: " + docAddress(doc),
-    doc.visibility === "public" ? "публичный" : "закрытый",
+    doc.visibility === "public" ? "публичный" : "приватный",
     "обновлён " + new Date(doc.updated_at).toLocaleString("ru-RU"),
   ].join(" · ");
 
@@ -669,7 +669,7 @@ async function openDoc(owner, path) {
   el("expiry-form").hidden = true;
   if (doc.can_edit) {
     el("toggle-vis").textContent =
-      doc.visibility === "public" ? "Сделать закрытым" : "Сделать публичным";
+      doc.visibility === "public" ? "Сделать приватным" : "Сделать публичным";
   }
 
   await loadComments(owner, doc);
@@ -1132,9 +1132,9 @@ el("toggle-vis").addEventListener("click", async () => {
     const doc = await api(apiPath(state.doc.owner, state.doc.path),
       { method: "PUT", body: { visibility: next } });
     state.doc = doc;
-    status(next === "public" ? "Документ открыт для всех." : "Документ закрыт.");
+    status(next === "public" ? "Документ открыт для всех." : "Документ теперь приватный.");
     await openDoc(doc.owner, doc.path);
-    status(next === "public" ? "Документ открыт для всех." : "Документ закрыт.");
+    status(next === "public" ? "Документ открыт для всех." : "Документ теперь приватный.");
   } catch (err) {
     fail(err);
   }
