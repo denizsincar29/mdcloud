@@ -30,6 +30,12 @@ never send to a server.
   `Ctrl+S` there creates the document in the cloud.
 - **Visibility** is per document: `public` or `private`, private is the default.
 - **Comments** can be anonymous (with a name you type) or from a logged-in user.
+  A comment can point at a line of the document: `{line 5}` renders as a link
+  labelled «строка 5», and `[здесь]{line 5}` uses the bracketed text as its
+  label, like a markdown hyperlink. The editor button **Указать на строку
+  документа** walks the document blocks with the arrow keys and inserts the
+  reference at the caret — with the selection wrapped, if there is one. `Alt+B`
+  jumps back to the comment anchor you left from (a button or such a link).
 - **Registration is by invitation.** The first account is the cloud owner: they
   pass without a code and hand out one-time codes to everyone else.
 - **One markdown — one look.** The preview renders a document exactly like the

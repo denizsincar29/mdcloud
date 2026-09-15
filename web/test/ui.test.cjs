@@ -302,10 +302,16 @@ async function main() {
       "GET /api/comments/deniz/lab1": () => ({
         status: 200,
         body: {
-          comments: [{
-            id: 1, body: "Вот здесь {line 3} — важно", author_name: "Дениз",
-            anonymous: false, mine: false, created_at: "2026-09-15T11:00:00Z",
-          }],
+          comments: [
+            {
+              id: 1, body: "Вот здесь {line 3} — важно", author_name: "Дениз",
+              anonymous: false, mine: false, created_at: "2026-09-15T11:00:00Z",
+            },
+            {
+              id: 2, body: "А [тут]{line5} другое", author_name: "Дениз",
+              anonymous: false, mine: false, created_at: "2026-09-15T11:05:00Z",
+            },
+          ],
           can_comment: true, comments_on: true, require_auth: false, viewer_authenticated: true,
         },
       }),
@@ -323,23 +329,30 @@ async function main() {
     const lines = [...w.document.querySelectorAll("#doc-body .doc-block")].map((b) => b.dataset.line);
     ok("документ разложен по блокам с номерами строк", lines.join(",") === "1,3,5", JSON.stringify(lines));
 
-    // {line 3} в комментарии — ссылка, которая ведёт на ту же строку документа.
-    const link = $("comments").querySelector("a.line-ref");
-    ok("ссылка на строку показана как «строка 3»",
-      Boolean(link) && link.textContent === "строка 3", $("comments").innerHTML);
-    click(w, link);
-    ok("переход по ссылке ставит фокус на строку документа",
-      w.document.activeElement.id === "line-3", w.document.activeElement.id || w.document.activeElement.tagName);
+    // «{line 3}» — ссылка с подписью «строка 3», «[тут]{line 5}» — со своей.
+    const links = [...$("comments").querySelectorAll("a.line-ref")];
+    ok("ссылка без подписи показана как «строка 3»",
+      links[0] && links[0].textContent === "строка 3", $("comments").innerHTML);
+    ok("ссылка с подписью показана как «тут»",
+      links[1] && links[1].textContent === "тут", $("comments").innerHTML);
 
-    // Пишем комментарий, встаём курсором после «Вот здесь» и указываем строку.
+    click(w, links[1]);
+    ok("переход по ссылке ставит фокус на строку документа",
+      w.document.activeElement.id === "line-5", w.document.activeElement.id || w.document.activeElement.tagName);
+    key(w, "b", { code: "KeyB", altKey: true });
+    ok("Alt+B вернул на ту самую ссылку в комментарии",
+      w.document.activeElement === links[1], w.document.activeElement.tagName);
+
+    // Пишем комментарий, выделяем слово и указываем строку: слово становится
+    // подписью ссылки — «[Вот здесь]{line 3}».
     const field = $("comment-body");
     const submitButton = $("comment-form").querySelector('button[type="submit"]');
     submitButton.dispatchEvent(new w.Event("focusin", { bubbles: true }));
 
     field.focus();
     field.value = "Вот здесь";
-    field.setSelectionRange(9, 9); // курсор после «Вот здесь»
-    field.dispatchEvent(new w.Event("keyup", { bubbles: true }));
+    field.setSelectionRange(0, 9); // выделено всё слово
+    field.dispatchEvent(new w.Event("select", { bubbles: true }));
 
     click(w, $("comment-line"));
     ok("выбор строки начался с первой строки",
@@ -348,10 +361,20 @@ async function main() {
     ok("стрелка вниз ведёт на следующую строку",
       w.document.activeElement.dataset.line === "3", w.document.activeElement.dataset.line || w.document.activeElement.tagName);
     key(w, "Enter");
-    ok("Enter вставил ссылку туда, где писал", field.value === "Вот здесь{line 3}", field.value);
+    ok("Enter обернул выделенное слово ссылкой",
+      field.value === "[Вот здесь]{line 3}", field.value);
     ok("фокус вернулся в комментарий", w.document.activeElement === field, w.document.activeElement.tagName);
 
-    key(w, "Escape");
+    // Без выделения вставляется простая ссылка — и в то место, где курсор.
+    field.value = "Смотри ";
+    field.setSelectionRange(7, 7);
+    field.dispatchEvent(new w.Event("keyup", { bubbles: true }));
+    key(w, "Escape"); // снять выбор строки
+    click(w, $("comment-line"));
+    key(w, "Enter");
+    ok("без выделения вставилась простая ссылка на первую строку",
+      field.value === "Смотри {line 1}", field.value);
+
     $("line-5").focus();
     ok("ушли в документ", w.document.activeElement.id === "line-5", w.document.activeElement.id);
     key(w, "b", { code: "KeyB", altKey: true });

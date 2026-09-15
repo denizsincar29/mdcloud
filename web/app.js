@@ -228,25 +228,32 @@ function blockByLine(line) {
   return found || blocks[0] || null;
 }
 
-// Кнопка, к которой возвращаемся: последняя нажатая в форме комментария.
-// Alt+B (и возврат после вставки ссылки) ведут на неё, а если ничего не
-// нажимали — в поле комментария.
-let lastCommentButton = null;
+// Куда возвращает Alt+B: последний якорь, с которого человек ушёл в документ, —
+// кнопка формы комментария или ссылка «строка N» в самом комментарии. Ничего
+// не нажимали — ведём в поле комментария.
+let lastCommentAnchor = null;
 
 function commentAnchor() {
-  return lastCommentButton && document.body.contains(lastCommentButton)
-    ? lastCommentButton
+  return lastCommentAnchor && document.body.contains(lastCommentAnchor)
+    ? lastCommentAnchor
     : el("comment-body");
 }
 
-// Где стоит курсор в комментарии. Пока фокус в поле, это selectionStart; после
-// ухода в документ — место, где он был: ссылка встаёт туда, где человек писал.
-let caret = 0;
+// Где стоит курсор и что выделено в комментарии. Пока фокус в поле, берём
+// selectionStart/End; после ухода в документ — последнее, что запомнили: туда
+// встанет ссылка, а выделенный текст станет её подписью.
+let region = { start: 0, end: 0 };
 
-function commentCaret() {
+function commentRegion() {
   const field = el("comment-body");
-  if (document.activeElement === field) caret = field.selectionStart ?? field.value.length;
-  return Math.min(caret, field.value.length);
+  if (document.activeElement === field) {
+    region = {
+      start: field.selectionStart ?? field.value.length,
+      end: field.selectionEnd ?? field.value.length,
+    };
+  }
+  const len = field.value.length;
+  return { start: Math.min(region.start, len), end: Math.min(region.end, len) };
 }
 
 function startPicking() {
@@ -272,17 +279,24 @@ function movePick(step) {
   blocks[picker.index].focus();
 }
 
-// insertLineRef дописывает {line N} туда, где человек писал, и возвращает
-// фокус в комментарий — «вставилось, пиши дальше».
+// insertLineRef вставляет ссылку на строку туда, где человек писал, и
+// возвращает фокус в комментарий — «вставилось, пиши дальше». Выделенное слово
+// становится подписью ссылки: «[здесь]{line 5}» — как гиперссылка в markdown,
+// только ведёт она на строку документа. Без выделения вставляется «{line 5}».
 function insertLineRef(line) {
   const field = el("comment-body");
-  const at = commentCaret();
-  const ref = "{line " + line + "}";
-  field.value = field.value.slice(0, at) + ref + field.value.slice(at);
-  caret = at + ref.length;
+  const { start, end } = commentRegion();
+  const picked = end > start;
+  const ref = picked
+    ? "[" + field.value.slice(start, end) + "]{line " + line + "}"
+    : "{line " + line + "}";
+  field.value = field.value.slice(0, start) + ref + field.value.slice(end);
+  region = { start: start + ref.length, end: start + ref.length };
   field.focus();
-  field.setSelectionRange(caret, caret);
-  status("Строка " + line + " вставлена.");
+  field.setSelectionRange(region.start, region.start);
+  status(picked
+    ? "Строка " + line + " встала ссылкой на выделенное слово."
+    : "Строка " + line + " вставлена.");
 }
 
 // focusLine — переход по ссылке {line N}: ставим фокус на строку документа,
@@ -299,25 +313,34 @@ function focusLine(line) {
   block.focus();
 }
 
-// paintCommentBody показывает текст комментария, превращая {line N} в ссылку.
-// Собираем через текстовые узлы: в комментариях разметке места нет.
-const LINE_REF = /\{line (\d+)\}/g;
+// paintCommentBody показывает текст комментария, превращая ссылку на строку в
+// настоящую ссылку. Две формы: «{line 5}» — подпись «строка 5», и
+// «[здесь]{line 5}» — подпись своя, как у гиперссылки в markdown. Собираем
+// через текстовые узлы: остальной разметке в комментариях места нет.
+const LINE_REF = /\[([^\]\n]+)\]\{line\s*(\d+)\}|\{line\s*(\d+)\}/g;
+
+function lineRefLink(label, line) {
+  const link = document.createElement("a");
+  link.href = "#line-" + line;
+  link.className = "line-ref";
+  link.textContent = label;
+  link.addEventListener("click", (event) => {
+    event.preventDefault();
+    // Запоминаем саму ссылку — Alt+B вернёт сюда же.
+    lastCommentAnchor = link;
+    focusLine(line);
+  });
+  return link;
+}
 
 function paintCommentBody(into, text) {
   into.replaceChildren();
   let last = 0;
   for (const match of (text || "").matchAll(LINE_REF)) {
     if (match.index > last) into.append(document.createTextNode(text.slice(last, match.index)));
-    const line = Number(match[1]);
-    const link = document.createElement("a");
-    link.href = "#line-" + line;
-    link.className = "line-ref";
-    link.textContent = "строка " + line;
-    link.addEventListener("click", (event) => {
-      event.preventDefault();
-      focusLine(line);
-    });
-    into.append(link);
+    const label = (match[1] || "").trim();
+    const line = Number(match[2] ?? match[3]);
+    into.append(lineRefLink(label || "строка " + line, line));
     last = match.index + match[0].length;
   }
   if (last < (text || "").length) into.append(document.createTextNode(text.slice(last)));
@@ -785,12 +808,16 @@ el("toggle-vis").addEventListener("click", async () => {
   }
 });
 
-// Последняя нажатая кнопка формы комментария — к ней ведёт Alt+B.
-el("comment-form").addEventListener("focusin", (event) => {
-  if (event.target.closest("button")) lastCommentButton = event.target.closest("button");
+// Последний якорь в комментариях — кнопка формы или ссылка на строку: к нему
+// ведёт Alt+B, откуда бы человек ни вернулся.
+el("comments-block").addEventListener("focusin", (event) => {
+  const anchor = event.target.closest && event.target.closest("button, a.line-ref");
+  if (anchor) lastCommentAnchor = anchor;
 });
-for (const type of ["keyup", "click", "select", "blur"]) {
-  el("comment-body").addEventListener(type, commentCaret);
+// Позицию и выделение запоминаем, пока фокус ещё в поле: после ухода в документ
+// поле их уже не отдаст.
+for (const type of ["keyup", "click", "select", "input", "focus"]) {
+  el("comment-body").addEventListener(type, commentRegion);
 }
 
 el("comment-line").addEventListener("click", startPicking);
