@@ -46,11 +46,14 @@ never send to a server.
   on outright: the reference lands where you were writing and you are back in
   the comment box. `Alt+B` jumps back to the comment anchor you left from (a
   button or such a link).
-- **A chess block draws a board**, not a list of pieces: the grid (8 × 52 px
-  cells) and the piece colours are the page's job, since chessjax itself only
-  brings the pieces and the coordinates. The rules live in `web/style.css` and
-  are kept equal to `mathmd/style.css`, so a board looks the same in the editor
-  and in the cloud.
+- **A chess block draws a board**, not a list of pieces. The board is entirely
+  chessjax's own: the grid, the square size, the pieces, the buttons and the
+  fullscreen layout all come from the module, so the page supplies nothing but
+  the tag — `<chessjax-board fen|pgn>`. This page used to carry its own copy of
+  the board theme and it drifted: the board collapsed into a column of pieces.
+  The copy is gone and `web/style.css` holds no chess rules at all; chessjax
+  keeps that guarantee with `test-bare.html`, a page with no stylesheet of its
+  own.
 - **Registration is by invitation.** The first account is the cloud owner: they
   pass without a code and hand out one-time codes to everyone else.
 - **One markdown — one look.** The preview renders a document exactly like the

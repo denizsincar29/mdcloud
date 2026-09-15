@@ -140,8 +140,9 @@ async function renderers() {
       extensions: [chessExtension, desmosExtension],
     });
     state.renderers = { showdown };
-    // Шахматный компонент — тот же, что в mathmd.
-    import("https://cdn.jsdelivr.net/gh/denizsincar29/chessjax@v0.8.0/chessjax.js").catch(() => {});
+    // Шахматный компонент — тот же, что в mathmd. Доску, фигуры, клавиши и
+    // анализ он приносит с собой: страница даёт только тег с fen или pgn.
+    import("https://cdn.jsdelivr.net/gh/denizsincar29/chessjax@v0.8.1/chessjax.js").catch(() => {});
   }
   return state.renderers;
 }
