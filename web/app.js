@@ -121,7 +121,7 @@ async function renderers() {
       simplifiedAutoLink: true,
       strikethrough: true,
       headerLevelStart: 2,
-      extensions: [chessExtension],
+      extensions: [chessExtension, desmosExtension],
     });
     state.renderers = { showdown };
     // Шахматный компонент — тот же, что в mathmd.
@@ -144,6 +144,139 @@ const chessExtension = {
     });
   },
 };
+
+// ```desmos ... ``` → пустое место под график. Расширение ставит только
+// контейнер: сам график — это чужой SDK и iframe, и грузить его ради документа
+// без графиков незачем (см. initDesmos). Тело блока едет в data-атрибуте
+// целиком закодированным — строки выражений не должны разбираться как
+// разметка. Кнопку входа (см. DESMOS_ENTER) ставит initDesmos: она должна
+// стоять рядом с контейнером, а не внутри абзаца, которым showdown окружил бы
+// строчную разметку.
+const desmosExtension = {
+  type: "lang",
+  filter(text) {
+    return text.replace(/```desmos[^\n]*\n([\s\S]*?)```/g, (_, body) =>
+      `<div class="desmos" data-desmos-body="${encodeURIComponent(body)}"></div>`);
+  },
+};
+
+// ------------------------------------------------------------------ Desmos
+
+// График Desmos — тот же API и тот же ключ, что в редакторе mathmd: один
+// документ должен выглядеть в облаке и в редакторе одинаково.
+const DESMOS_SRC =
+  "https://www.desmos.com/api/v1.10/calculator.js?apiKey=dcb31709b452b1cf9dc26972add0fda6";
+
+let desmosLoading = null;
+
+// SDK грузим лениво и один раз — как MathJax. Ключ в адресе публичный,
+// демонстрационный: тот же, что стоит в редакторе.
+function loadDesmos() {
+  // SDK уже на странице (или подставлен тестом) — второй раз не грузим.
+  if (window.Desmos && typeof window.Desmos.Calculator === "function") {
+    return Promise.resolve(window.Desmos);
+  }
+  if (!desmosLoading) {
+    desmosLoading = new Promise((resolve, reject) => {
+      const script = document.createElement("script");
+      script.src = DESMOS_SRC;
+      script.async = true;
+      script.onload = () => resolve(window.Desmos);
+      script.onerror = () => reject(new Error("Desmos не загрузился"));
+      document.head.append(script);
+    });
+  }
+  return desmosLoading;
+}
+
+function desmosFallback(spot, why) {
+  spot.replaceChildren();
+  const span = document.createElement("span");
+  span.className = "desmos-fallback";
+  span.textContent = why;
+  spot.append(span);
+}
+
+// Кнопка входа перед графиком. График — чужой iframe: Tab внутрь не доводит,
+// стрелки его не трогают, и без такой кнопки незрячему в калькулятор не
+// попасть. Кнопка невидимая, но стоит в потоке фокуса: скринридер читает её
+// как «График Desmos — перейти к списку выражений, кнопка», а Enter (пробел)
+// переводит фокус внутрь, сразу в список выражений. Пока графика нет, кнопки
+// тоже нет — обещать вход в то, чего не построилось, незачем.
+function desmosEnterButton(calc, spot) {
+  const enter = document.createElement("button");
+  enter.type = "button";
+  enter.className = "desmos-enter";
+  enter.style.cssText =
+    "position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap";
+  enter.textContent = "График Desmos — перейти к списку выражений, кнопка";
+  enter.addEventListener("click", () => enterDesmos(calc, spot));
+  spot.before(enter);
+  return enter;
+}
+
+// Вход в график: штатный метод Desmos ставит фокус в список выражений; если
+// версия API его не знает, фокусируем сам iframe — тогда до списка дойдёт Tab.
+function enterDesmos(calc, spot) {
+  if (calc && typeof calc.focusFirstExpression === "function") {
+    try {
+      calc.focusFirstExpression();
+      return;
+    } catch (err) {
+      console.warn("[mdcloud] вход в график Desmos:", err);
+    }
+  }
+  const frame = spot.querySelector("iframe");
+  if (frame) frame.focus();
+}
+
+// initDesmos наполняет контейнеры графиков, которые поставило расширение
+// showdown. График не должен ронять показ документа: текст без графика
+// полезнее пустого экрана, поэтому о неудаче говорим в статусе и живём дальше.
+async function initDesmos(root) {
+  const spots = [...root.querySelectorAll(".desmos[data-desmos-body]")];
+  if (!spots.length) return;
+  let Desmos;
+  try {
+    Desmos = await loadDesmos();
+  } catch (err) {
+    spots.forEach((spot) => desmosFallback(spot, "График Desmos не загрузился."));
+    status("Графики Desmos не загрузились: " + err.message);
+    return;
+  }
+  for (const spot of spots) {
+    const body = decodeURIComponent(spot.dataset.desmosBody || "");
+    if (!body.trim()) continue;
+    try {
+      const calc = Desmos.Calculator(spot, {
+        expressions: true,
+        settingsMenu: false,
+        border: false,
+        projectorMode: true,
+      });
+      body
+        .split("\n")
+        .map((s) => s.trim())
+        .filter(Boolean)
+        .forEach((expr, i) => {
+          try {
+            calc.setExpression({ id: "e" + i, latex: expr });
+          } catch (err) {
+            console.warn("[mdcloud] выражение Desmos не распознано:", expr, err);
+          }
+        });
+      // График готов — открываем вход: кнопка встаёт перед контейнером.
+      desmosEnterButton(calc, spot);
+    } catch (err) {
+      desmosFallback(spot, "График Desmos не построился.");
+      console.error("[mdcloud] не удалось создать график Desmos:", err);
+    }
+  }
+}
+
+// Наружу — нарочно: страница живёт одним файлом без модулей, и это
+// единственный способ проверить разбор блока тестом (web/test/ui.test.cjs).
+window.mdcloudDesmosExtension = desmosExtension;
 
 // md.mjs — модуль, и грузим мы его сами: страница живёт одним скриптом, а
 // тест прогоняет её в jsdom как обычный скрипт, где import не работает (см.
@@ -575,6 +708,9 @@ async function openDoc(owner, path) {
   try {
     await paintDocument(doc.content, body);
     await typesetMath(body);
+    // Графики достраиваются в фоне: SDK Desmos тяжелее документа, и ждать его
+    // ради того, чтобы отдать страницу, незачем.
+    initDesmos(body).catch((err) => status("Графики Desmos: " + err.message));
   } catch (err) {
     body.replaceChildren();
     const pre = document.createElement("pre");

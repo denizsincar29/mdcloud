@@ -46,9 +46,10 @@ never send to a server.
   pass without a code and hand out one-time codes to everyone else.
 - **One markdown — one look.** The preview renders a document exactly like the
   mathmd editor does: showdown, MathJax 4 (LaTeX and AsciiMath, with hidden
-  MathML for screen readers), chess boards, frontmatter stripped. The page runs
-  under a CSP that keeps scripts to itself and jsdelivr and has no
-  `unsafe-inline` for scripts, so nothing written in a document can execute.
+  MathML for screen readers), chess boards, Desmos graphs, frontmatter
+  stripped. The page runs under a CSP that keeps scripts to itself, jsdelivr
+  and desmos.com, and has no `unsafe-inline` for scripts, so nothing written in
+  a document can execute.
 
 ## Install
 
@@ -204,15 +205,20 @@ to be somebody who can hand out codes.
   neither `unsafe-inline` nor `unsafe-eval`, so an inline `<script>`, an
   `onclick=` attribute or a `javascript:` link in a document does not run;
   `form-action 'self'` stops a form from posting credentials elsewhere; frames
+  are limited to desmos.com, where the graph calculator lives, and otherwise
   fall back to `default-src 'self'`. Strip the CSP (a static host that does not
   let you set headers, say) and the page is no longer safe — put DOMPurify back
   before that.
 - `style-src` does carry `'unsafe-inline'`: MathJax and chessjax build their
   stylesheets inside the page. Injected CSS is an annoyance, not an execution
   path.
-- Third-party scripts are pinned to jsdelivr in the CSP. Self-hosting showdown,
-  MathJax and chessjax under `web/vendor/` and dropping the CDN from the policy
-  is a small change if you would rather not depend on it.
+- Third-party scripts are pinned to jsdelivr and desmos.com in the CSP.
+  Self-hosting showdown, MathJax and chessjax under `web/vendor/` and dropping
+  the CDN from the policy is a small change if you would rather not depend on
+  it; the Desmos SDK has to come from desmos.com either way.
+- The Desmos SDK is loaded only when a document actually carries a
+  ` ```desmos ` block; the API key in `app.js` is the public demo key, the same
+  one the editor uses.
 
 ## Layout
 
@@ -260,9 +266,8 @@ against the real showdown if it is installed.
 
 ## Not done yet
 
-- Desmos blocks (` ```desmos `) are not rendered in the preview: the graph
-  needs its SDK and its API key, and a read-only page does not need a live
-  calculator yet. Formulas, AsciiMath and chess boards do render.
+- A Desmos graph is a live calculator, so a document with a graph is neither
+  printable nor available offline; documents without graphs load no SDK at all.
 - No password reset by email, no admin UI for users (only for invites).
 - Comments are not paginated.
 - One process, one rate limiter in memory; a second node would need a shared

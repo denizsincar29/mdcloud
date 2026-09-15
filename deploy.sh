@@ -356,7 +356,7 @@ $DOMAIN {
 		X-Content-Type-Options nosniff
 		Referrer-Policy no-referrer
 		Strict-Transport-Security "max-age=31536000"
-		Content-Security-Policy "default-src 'self'; script-src 'self' https://cdn.jsdelivr.net; style-src 'self'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+		Content-Security-Policy "default-src 'self'; script-src 'self' https://cdn.jsdelivr.net https://www.desmos.com; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://www.desmos.com; img-src 'self' data: https:; font-src 'self' data: https://cdn.jsdelivr.net https://www.desmos.com; connect-src 'self' https://www.desmos.com; frame-src https://www.desmos.com; form-action 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
 	}
 
 	handle /api/* {

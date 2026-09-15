@@ -438,6 +438,68 @@ async function main() {
     ok("и подсказки про подпись тоже нет", $("comment-hint").textContent === "", $("comment-hint").textContent);
   }
 
+  // --- 8д. Блок desmos: контейнер, SDK, кнопка входа --------------------------
+  {
+    const expr = [];
+    let focused = false;
+    const Desmos = {
+      Calculator: () => ({
+        setExpression: (e) => expr.push(e.latex),
+        focusFirstExpression: () => { focused = true; },
+      }),
+    };
+    const plot = "y = x^2 - 2\ny = \\sin(x)";
+    const blocks = [
+      { line: 1, html: "<p>График ниже.</p>" },
+      { line: 3, html: '<div class="desmos" data-desmos-body="' + encodeURIComponent(plot) + '"></div>' },
+    ];
+    const api = makeApi({
+      "GET /api/me": () => ({ status: 200, body: { user: { username: "deniz", is_admin: true } } }),
+      "GET /api/docs/deniz/график": () => ({
+        status: 200,
+        body: {
+          owner: "deniz", path: "график", title: "График",
+          content: "График ниже.\n\n```desmos\n" + plot + "\n```",
+          visibility: "public", updated_at: "2026-09-15T10:00:00Z", can_edit: true,
+        },
+      }),
+      "GET /api/comments/deniz/график": () => ({
+        status: 200,
+        body: { comments: [], comments_on: true, can_comment: true, require_auth: false, viewer_authenticated: true },
+      }),
+    });
+    const { $, w, tick } = await boot({
+      path: "/deniz/график",
+      api,
+      hooks: {
+        Desmos,
+        MathJax: { startup: { promise: Promise.resolve() }, typesetPromise: async () => {} },
+        mdcloudRenderers: { showdown: { makeHtml: (md) => "<p>" + md + "</p>" } },
+        mdcloudMd: { markdownBlocks: () => blocks },
+      },
+    });
+
+    const html = w.mdcloudDesmosExtension.filter("```desmos\n" + plot + "\n```");
+    ok("блок desmos становится контейнером графика",
+      /class="desmos"/.test(html) && html.includes(encodeURIComponent(plot)), html);
+    ok("выражения едут в атрибуте, а не разметкой",
+      !/<p>|y = x\^2/.test(html), html);
+
+    await tick(); // график строится в фоне: initDesmos — тоже асинхронный
+    await tick();
+    ok("SDK получил обе строки графика", expr.join(" | ") === "y = x^2 - 2 | y = \\sin(x)", JSON.stringify(expr));
+
+    const enter = $("doc-body").querySelector(".desmos-enter");
+    ok("перед графиком встала кнопка входа", Boolean(enter), $("doc-body").innerHTML);
+    ok("кнопка подписана для чтеца экрана",
+      enter && /к списку выражений/.test(enter.textContent), enter && enter.textContent);
+    ok("кнопка стоит перед контейнером, а не внутри",
+      enter && enter.nextElementSibling && enter.nextElementSibling.classList.contains("desmos"));
+
+    click(w, enter);
+    ok("кнопка входа зовёт список выражений", focused);
+  }
+
   // --- 9. Комментарий ссылается на строку документа --------------------------
   {
     const blocks = [
