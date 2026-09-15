@@ -9,6 +9,7 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 
+	"github.com/denizsincar29/mdcloud/internal/mdpath"
 	"github.com/denizsincar29/mdcloud/internal/models"
 )
 
@@ -39,6 +40,57 @@ func Migrate(db *gorm.DB) error {
 	return db.AutoMigrate(
 		&models.User{}, &models.Doc{}, &models.Comment{}, &models.Session{},
 		&models.Invite{}, &models.APIToken{})
+}
+
+// EnsureSlugs проставляет адресам латинское представление для ссылок.
+//
+// Колонка появилась позже самих документов, поэтому у всего, что лежало в
+// облаке раньше, слаг пуст. Он выводится из пути одной функцией, так что
+// это разовая уборка при старте, а не второй источник правды.
+func EnsureSlugs(db *gorm.DB) error {
+	var docs []models.Doc
+	if err := db.Unscoped().Select("id", "path", "slug").Find(&docs).Error; err != nil {
+		return err
+	}
+	for i := range docs {
+		want := mdpath.Slug(docs[i].Path)
+		if docs[i].Slug == want {
+			continue
+		}
+		if err := db.Unscoped().Model(&models.Doc{}).Where("id = ?", docs[i].ID).
+			Update("slug", want).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// PurgeExpiredDocs стирает документы, у которых вышел срок.
+//
+// Документ на срок заводят, чтобы отдать его кому-то ненадолго — домашка
+// учителю. Обещание «через неделю его здесь не будет» должно исполняться
+// буквально, поэтому удаление жёсткое, вместе с комментариями: держать
+// содержимое в таблице «на всякий случай» значило бы обещать не то, что
+// делаешь.
+func PurgeExpiredDocs(db *gorm.DB, now time.Time) (int64, error) {
+	var docs []models.Doc
+	if err := db.Unscoped().Select("id").
+		Where("expires_at IS NOT NULL AND expires_at <= ?", now).
+		Find(&docs).Error; err != nil {
+		return 0, err
+	}
+	if len(docs) == 0 {
+		return 0, nil
+	}
+	ids := make([]uint, 0, len(docs))
+	for i := range docs {
+		ids = append(ids, docs[i].ID)
+	}
+	if err := db.Where("doc_id IN ?", ids).Delete(&models.Comment{}).Error; err != nil {
+		return 0, err
+	}
+	res := db.Unscoped().Where("id IN ?", ids).Delete(&models.Doc{})
+	return res.RowsAffected, res.Error
 }
 
 // PurgeExpired удаляет протухшие сессии и просроченные API-ключи. Приглашения

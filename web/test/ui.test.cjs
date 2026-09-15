@@ -338,16 +338,19 @@ async function main() {
 
   // --- 8б. Список документов — деревом: папка заголовком, файлы под ней ------
   {
+    // Срок берём от сегодняшнего дня: тест должен читаться одинаково и сегодня,
+    // и через полгода.
+    const soon = new Date(Date.now() + 7 * 86400000).toISOString();
     const api = makeApi({
       "GET /api/me": () => ({ status: 200, body: { user: { username: "deniz", is_admin: true } } }),
       "GET /api/docs/deniz": () => ({
         status: 200,
         body: {
           docs: [
-            { path: "заметки", title: "заметки", visibility: "public" },
-            { path: "сафу/мо/лаб1", title: "лаб1", visibility: "private" },
-            { path: "сафу/мо/лаб2", title: "лаб2", visibility: "public" },
-            { path: "сафу/ии/конспект", title: "конспект", visibility: "public" },
+            { path: "заметки", slug: "zametki", title: "заметки", visibility: "public" },
+            { path: "сафу/мо/лаб1", slug: "safu/mo/lab1", title: "лаб1", visibility: "private" },
+            { path: "сафу/мо/лаб2", slug: "safu/mo/lab2", title: "лаб2", visibility: "public", expires_at: soon },
+            { path: "сафу/ии/конспект", slug: "safu/ii/konspekt", title: "конспект", visibility: "public" },
           ],
         },
       }),
@@ -366,18 +369,26 @@ async function main() {
     ok("закрытость помечена у нужного файла",
       /закрытый/.test(list.querySelectorAll("li.folder")[2].querySelectorAll("li")[0].textContent),
       list.innerHTML);
-    const hrefs = [...list.querySelectorAll("a")].map((a) => decodeURIComponent(a.getAttribute("href")));
-    ok("ссылки ведут на полный адрес документа",
-      hrefs.join(", ") === "/deniz/заметки, /deniz/сафу/ии/конспект, /deniz/сафу/мо/лаб1, /deniz/сафу/мо/лаб2",
+    // Документ на срок помечен в списке: иначе он возьмёт и пропадёт незаметно.
+    const until = new Date(soon).toLocaleDateString("ru-RU");
+    ok("у документа на срок видно, до какого числа он живёт",
+      list.querySelectorAll("li.folder")[2].querySelectorAll("li")[1].textContent.includes("до " + until),
+      list.querySelectorAll("li.folder")[2].querySelectorAll("li")[1].textContent);
+    // В ссылке адрес латиницей (slug с сервера): кириллица в ней превратилась
+    // бы в «%D0%94…» — такую ссылку не продиктовать и не прочитать с экрана.
+    const hrefs = [...list.querySelectorAll("a")].map((a) => a.getAttribute("href"));
+    ok("ссылки ведут на полный адрес документа латиницей",
+      hrefs.join(", ") === "/deniz/zametki, /deniz/safu/ii/konspekt, /deniz/safu/mo/lab1, /deniz/safu/mo/lab2",
       hrefs.join(", "));
   }
 
   // --- 8в. Переименование: кнопка, новый путь, PATCH --------------------------
   {
     const doc = {
-      owner: "deniz", path: "сафу/мо/лаб1", title: "лаб1",
+      owner: "deniz", path: "сафу/мо/лаб1", slug: "safu/mo/lab1", title: "лаб1",
       content: "текст", visibility: "public", updated_at: "2026-09-15T10:00:00Z", can_edit: true,
     };
+    const moved = { ...doc, path: "сафу/мо/лаб3", slug: "safu/mo/lab3", title: "лаб3" };
     const api = makeApi({
       "GET /api/me": () => ({ status: 200, body: { user: { username: "deniz", is_admin: true } } }),
       "GET /api/docs/deniz/сафу/мо/лаб1": () => ({ status: 200, body: doc }),
@@ -385,13 +396,8 @@ async function main() {
         status: 200,
         body: { comments: [], comments_on: true, can_comment: true, require_auth: false, viewer_authenticated: true },
       }),
-      "PATCH /api/docs/deniz/сафу/мо/лаб1": () => ({
-        status: 200,
-        body: { ...doc, path: "сафу/мо/лаб3", title: "лаб3" },
-      }),
-      "GET /api/docs/deniz/сафу/мо/лаб3": () => ({
-        status: 200, body: { ...doc, path: "сафу/мо/лаб3", title: "лаб3" },
-      }),
+      "PATCH /api/docs/deniz/сафу/мо/лаб1": () => ({ status: 200, body: moved }),
+      "GET /api/docs/deniz/сафу/мо/лаб3": () => ({ status: 200, body: moved }),
       "GET /api/comments/deniz/сафу/мо/лаб3": () => ({
         status: 200,
         body: { comments: [], comments_on: true, can_comment: true, require_auth: false, viewer_authenticated: true },
@@ -400,7 +406,8 @@ async function main() {
     const { $, w, tick } = await boot({ path: "/deniz/сафу/мо/лаб1", api });
     ok("кнопка переименования видна хозяину", $("rename-toggle").hidden === false);
     ok("форма переименования спрятана, пока её не позвали", $("rename-form").hidden === true);
-    ok("в шапке документа виден адрес", /Адрес: deniz\/сафу\/мо\/лаб1/.test($("doc-meta").textContent), $("doc-meta").textContent);
+    ok("в шапке документа виден адрес латиницей — его можно продиктовать",
+      /Адрес: deniz\/safu\/mo\/lab1/.test($("doc-meta").textContent), $("doc-meta").textContent);
 
     click(w, $("rename-toggle"));
     ok("кнопка раскрыла форму", $("rename-form").hidden === false);
@@ -414,6 +421,10 @@ async function main() {
     ok("перенос ушёл в API методом PATCH", Boolean(call), JSON.stringify(api.calls.map((c) => c.key)));
     ok("в теле новый путь, без пробелов", call && call.init.body.includes('"path":"сафу/мо/лаб3"'), call && call.init.body);
     ok("после переноса открылся новый адрес", /лаб3/.test($("doc-title").textContent), $("doc-title").textContent);
+    // Адрес страницы тоже латиницей: скопированная из браузера ссылка должна
+    // читаться вслух, а не превращаться в проценты.
+    ok("адрес страницы после переноса — латиницей",
+      w.location.pathname === "/deniz/safu/mo/lab3", w.location.pathname);
     ok("сказано, что документ перенесён", /перенесён/.test($("status").textContent), $("status").textContent);
   }
 
@@ -489,6 +500,61 @@ async function main() {
     // документе и со своей политикой.
     ok("SDK Desmos на странице документа не грузится",
       !w.document.querySelector('script[src*="desmos"]'), $("doc-body").innerHTML);
+  }
+
+  // --- 8е. Документ на срок: ставится, виден читателю, снимается -------------
+  {
+    // Документ открываем по латинской ссылке — той самой, которую человек
+    // диктует учителю: маршрут обязан довести её до того же документа.
+    const soon = new Date(Date.now() + 7 * 86400000).toISOString();
+    const doc = {
+      owner: "deniz", path: "сафу/мо/дз", slug: "safu/mo/dz", title: "ДЗ",
+      content: "текст", visibility: "public", can_edit: true,
+      updated_at: "2026-09-15T10:00:00Z", expires_at: soon,
+    };
+    const api = makeApi({
+      "GET /api/me": () => ({ status: 200, body: { user: { username: "deniz", is_admin: true } } }),
+      "GET /api/docs/deniz/safu/mo/dz": () => ({ status: 200, body: doc }),
+      // По каноническому адресу документ отдаём уже без срока: правка прошла,
+      // страница перерисовалась — так же ответит и настоящее облако.
+      "GET /api/docs/deniz/сафу/мо/дз": () => ({ status: 200, body: { ...doc, expires_at: null } }),
+      "GET /api/comments/deniz/сафу/мо/дз": () => ({
+        status: 200,
+        body: { comments: [], comments_on: true, can_comment: true, require_auth: false, viewer_authenticated: true },
+      }),
+      "PUT /api/docs/deniz/сафу/мо/дз": () => ({ status: 200, body: { ...doc, expires_at: null } }),
+    });
+    const { $, w, tick } = await boot({ path: "/deniz/safu/mo/dz", api });
+
+    ok("ссылка латиницей открывает тот же документ",
+      api.calls.some((c) => c.key === "GET /api/docs/deniz/safu/mo/dz"),
+      JSON.stringify(api.calls.map((c) => c.key)));
+    ok("документ нашёлся по ссылке", /ДЗ/.test($("doc-title").textContent), $("doc-title").textContent);
+    // Про срок сказано всем, кто открыл документ: тот, кому его отдали, должен
+    // видеть заранее, что ссылка однажды перестанет открываться.
+    ok("читателю видно, что документ на срок",
+      /удалится/.test($("doc-expiry").textContent) &&
+      $("doc-expiry").textContent.includes(new Date(soon).toLocaleDateString("ru-RU")),
+      $("doc-expiry").textContent);
+    ok("форма срока спрятана, пока её не позвали", $("expiry-form").hidden === true);
+
+    click(w, $("expiry-toggle"));
+    ok("кнопка раскрыла форму срока", $("expiry-form").hidden === false);
+    ok("в форме стоит срок этого документа, а не первый из списка",
+      $("expiry-days").value === "7", $("expiry-days").value);
+
+    $("expiry-days").value = "0";
+    submit(w, $("expiry-form"));
+    await tick();
+    await tick();
+    const call = api.calls.find((c) => c.key.startsWith("PUT "));
+    ok("срок ушёл в API тем же PUT, что и остальные правки", Boolean(call), JSON.stringify(api.calls.map((c) => c.key)));
+    ok("в теле — дней 0, остальное не тронуто",
+      call && call.init.body === '{"expires_in_days":0}', call && call.init.body);
+    ok("снятый срок больше не показан", $("doc-expiry").hidden === true, $("doc-expiry").textContent);
+    ok("сказано, что документ остаётся насовсем",
+      /насовсем/.test($("status").textContent), $("status").textContent);
+    ok("форма срока закрылась после сохранения", $("expiry-form").hidden === true);
   }
 
   // --- 9. Комментарий ссылается на строку документа --------------------------

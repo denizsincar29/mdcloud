@@ -54,23 +54,40 @@ func (u *User) Name() string {
 
 // Doc — один markdown-документ по адресу /<owner>/<path>.
 // Path хранится нормализованным: без ведущего слэша, сегменты через "/".
+//
+// Slug — тот же адрес латиницей для ссылки («ДЗ/ИИ» -> «dz/ii»). Это второе
+// представление одного и того же, а не второй ключ: он выводится из Path
+// одной функцией, поэтому разъехаться с ним не может. Кириллица в ссылке
+// превращается в «%D0%94…», и такую ссылку нельзя ни продиктовать, ни
+// прочитать с экрана.
 type Doc struct {
-	ID                  uint           `gorm:"primarykey" json:"id"`
-	OwnerID             uint           `gorm:"uniqueIndex:idx_doc_owner_path;not null" json:"owner_id"`
-	Owner               User           `gorm:"foreignKey:OwnerID" json:"-"`
-	Path                string         `gorm:"uniqueIndex:idx_doc_owner_path;size:255;not null" json:"path"`
-	Title               string         `gorm:"size:255" json:"title"`
-	Content             string         `gorm:"type:text" json:"content,omitempty"`
-	Visibility          string         `gorm:"size:16;not null;default:private" json:"visibility"`
-	CommentsOn          bool           `gorm:"not null;default:true" json:"comments_on"`
-	CommentsRequireAuth bool           `gorm:"not null;default:false" json:"comments_require_auth"`
-	CreatedAt           time.Time      `json:"created_at"`
-	UpdatedAt           time.Time      `json:"updated_at"`
-	DeletedAt           gorm.DeletedAt `gorm:"index" json:"-"`
+	ID                  uint   `gorm:"primarykey" json:"id"`
+	OwnerID             uint   `gorm:"uniqueIndex:idx_doc_owner_path;not null" json:"owner_id"`
+	Owner               User   `gorm:"foreignKey:OwnerID" json:"-"`
+	Path                string `gorm:"uniqueIndex:idx_doc_owner_path;size:255;not null" json:"path"`
+	Slug                string `gorm:"index;size:255" json:"slug"`
+	Title               string `gorm:"size:255" json:"title"`
+	Content             string `gorm:"type:text" json:"content,omitempty"`
+	Visibility          string `gorm:"size:16;not null;default:private" json:"visibility"`
+	CommentsOn          bool   `gorm:"not null;default:true" json:"comments_on"`
+	CommentsRequireAuth bool   `gorm:"not null;default:false" json:"comments_require_auth"`
+	// ExpiresAt — документ на срок: он нужен ровно затем, чтобы отдать его
+	// кому-то (домашка учителю) и не думать, что он висит в облаке вечно.
+	// Пусто — документ бессрочный, как всё остальное облако.
+	ExpiresAt *time.Time     `gorm:"index" json:"expires_at,omitempty"`
+	CreatedAt time.Time      `json:"created_at"`
+	UpdatedAt time.Time      `json:"updated_at"`
+	DeletedAt gorm.DeletedAt `gorm:"index" json:"-"`
 }
 
 // IsPublic сообщает, доступен ли документ без авторизации.
 func (d *Doc) IsPublic() bool { return d.Visibility == VisPublic }
+
+// Expired сообщает, что срок документа вышел: он уже не открывается никому,
+// а подметатель вот-вот сотрёт его совсем.
+func (d *Doc) Expired(now time.Time) bool {
+	return d.ExpiresAt != nil && now.After(*d.ExpiresAt)
+}
 
 // Comment — комментарий: либо от залогиненного пользователя (AuthorID),
 // либо анонимный с именем (AuthorID = nil, Name заполнен).

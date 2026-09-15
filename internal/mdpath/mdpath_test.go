@@ -40,6 +40,27 @@ func TestNormalize(t *testing.T) {
 	}
 }
 
+func TestSlug(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"ДЗ/ИИ/задачи", "dz/ii/zadachi"},
+		{"витрина/облако-и-редактор", "vitrina/oblako-i-redaktor"},
+		{"ДЗ-по-ИИ/задачи.md", "dz-po-ii/zadachi.md"},
+		{"уже/латиница", "uzhe/latinitsa"},
+		{"readme.md", "readme.md"},        // латиница едет как есть
+		{"ReadMe.md", "readme.md"},        // но регистр теряется
+		{"объём ёлки", "obem elki"},       // ъ пропадает, ё — как «е»
+		{"ЖЮЛЬ/ЩАВЕЛЬ", "zhyul/shchavel"}, // ж, ю, щ
+		{"письмо(1)+черновик", "pismo(1)+chernovik"},
+		{"ь/ъ", "ь/ъ"},                  // из одних «ь»/«ъ» транслита не выйдет
+		{"греческий/α", "grecheskiy/α"}, // чужой буквы в таблице нет — сегмент как есть
+	}
+	for _, c := range cases {
+		if got := Slug(c.in); got != c.want {
+			t.Errorf("Slug(%q) = %q, хотели %q", c.in, got, c.want)
+		}
+	}
+}
+
 func TestValidUsername(t *testing.T) {
 	for _, ok := range []string{"deniz", "va_sya-1", "abc"} {
 		if !ValidUsername(ok) {

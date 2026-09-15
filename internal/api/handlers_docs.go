@@ -2,6 +2,7 @@ package api
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -16,29 +17,40 @@ import (
 // Content отдаётся только там, где он реально нужен (просмотр и правка):
 // список документов не должен весить мегабайты.
 type docView struct {
-	Owner               string    `json:"owner"`
-	Path                string    `json:"path"`
-	Title               string    `json:"title"`
-	Content             string    `json:"content,omitempty"`
-	Visibility          string    `json:"visibility"`
-	CommentsOn          bool      `json:"comments_on"`
-	CommentsRequireAuth bool      `json:"comments_require_auth"`
-	CanEdit             bool      `json:"can_edit"`
-	URL                 string    `json:"url"`
-	CreatedAt           time.Time `json:"created_at"`
-	UpdatedAt           time.Time `json:"updated_at"`
+	Owner               string     `json:"owner"`
+	Path                string     `json:"path"`
+	Slug                string     `json:"slug"`
+	Title               string     `json:"title"`
+	Content             string     `json:"content,omitempty"`
+	Visibility          string     `json:"visibility"`
+	CommentsOn          bool       `json:"comments_on"`
+	CommentsRequireAuth bool       `json:"comments_require_auth"`
+	ExpiresAt           *time.Time `json:"expires_at,omitempty"`
+	CanEdit             bool       `json:"can_edit"`
+	URL                 string     `json:"url"`
+	CreatedAt           time.Time  `json:"created_at"`
+	UpdatedAt           time.Time  `json:"updated_at"`
 }
 
 func (s *Server) viewDoc(d *models.Doc, ownerName string, viewer *models.User, withContent bool) docView {
+	// Slug — то, как адрес выглядит в ссылке. Пустым он бывает только у
+	// документа, до которого ещё не дошла уборка при старте, поэтому считаем
+	// на месте: ссылка не должна зависеть от того, успела ли она пройти.
+	slug := d.Slug
+	if slug == "" {
+		slug = mdpath.Slug(d.Path)
+	}
 	v := docView{
 		Owner:               ownerName,
 		Path:                d.Path,
+		Slug:                slug,
 		Title:               d.Title,
 		Visibility:          d.Visibility,
 		CommentsOn:          d.CommentsOn,
 		CommentsRequireAuth: d.CommentsRequireAuth,
+		ExpiresAt:           d.ExpiresAt,
 		CanEdit:             viewer != nil && viewer.ID == d.OwnerID,
-		URL:                 s.cfg.BaseURL + "/" + ownerName + "/" + d.Path,
+		URL:                 s.cfg.BaseURL + "/" + ownerName + "/" + slug,
 		CreatedAt:           d.CreatedAt,
 		UpdatedAt:           d.UpdatedAt,
 	}
@@ -46,6 +58,33 @@ func (s *Server) viewDoc(d *models.Doc, ownerName string, viewer *models.User, w
 		v.Content = d.Content
 	}
 	return v
+}
+
+// findDoc ищет документ по адресу из ссылки. Адрес приходит в двух видах:
+// канонический путь, каким его набрал человек («ДЗ/ИИ»), и слаг — то, как он
+// выглядит в ссылке («dz/ii»). Оба ведут к одному документу, поэтому старая
+// кириллическая ссылка не ломается, когда появляется латинская.
+func (s *Server) findDoc(ownerID uint, addr string) (*models.Doc, error) {
+	var doc models.Doc
+	err := s.db.Where("owner_id = ? AND (path = ? OR slug = ?)", ownerID, addr, mdpath.Slug(addr)).
+		First(&doc).Error
+	return &doc, err
+}
+
+// slugTaken отвечает, занят ли слаг другим документом того же владельца.
+// Адрес в ссылке должен указывать ровно на один документ: если два разных
+// пути дают одну ссылку («ДЗ» и «dz»), второй заводить нельзя.
+func (s *Server) slugTaken(ownerID uint, slug, exceptPath string) (string, error) {
+	var other models.Doc
+	err := s.db.Where("owner_id = ? AND slug = ? AND path <> ?", ownerID, slug, exceptPath).
+		First(&other).Error
+	switch {
+	case errors.Is(err, gorm.ErrRecordNotFound):
+		return "", nil
+	case err != nil:
+		return "", err
+	}
+	return other.Path, nil
 }
 
 func (s *Server) findUser(username string) (*models.User, bool) {
@@ -69,8 +108,7 @@ func (s *Server) docForRequest(w http.ResponseWriter, r *http.Request, viewer *m
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return nil, nil, false
 	}
-	var doc models.Doc
-	err = s.db.Where("owner_id = ? AND path = ?", owner.ID, path).First(&doc).Error
+	doc, err := s.findDoc(owner.ID, path)
 	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 		writeErr(w, http.StatusInternalServerError, "база недоступна")
 		return nil, nil, false
@@ -80,7 +118,13 @@ func (s *Server) docForRequest(w http.ResponseWriter, r *http.Request, viewer *m
 		writeErr(w, http.StatusNotFound, "нет такого документа")
 		return nil, nil, false
 	}
-	return &doc, owner, true
+	// Срок вышел — документа больше нет, даже для хозяина: он сам его на
+	// срок и заводил. Подметатель сотрёт строку в ближайшие минуты.
+	if doc.Expired(time.Now()) {
+		writeErr(w, http.StatusNotFound, "срок документа вышел")
+		return nil, nil, false
+	}
+	return doc, owner, true
 }
 
 // ---------------------------------------------------------------- чтение
@@ -105,6 +149,9 @@ func (s *Server) respondDocList(w http.ResponseWriter, owner, viewer *models.Use
 	if viewer == nil || viewer.ID != owner.ID {
 		q = q.Where("visibility = ?", models.VisPublic)
 	}
+	// Документы с вышедшим сроком не показываем и хозяину: подметатель
+	// доберётся до них в четверть часа, а до тех пор их не должно быть видно.
+	q = q.Where("expires_at IS NULL OR expires_at > ?", time.Now())
 	var docs []models.Doc
 	if err := q.Order("path").Find(&docs).Error; err != nil {
 		writeErr(w, http.StatusInternalServerError, "база недоступна")
@@ -139,7 +186,14 @@ type docInput struct {
 	Public              *bool   `json:"public"` // короткая форма visibility
 	CommentsOn          *bool   `json:"comments_on"`
 	CommentsRequireAuth *bool   `json:"comments_require_auth"`
+	// ExpiresInDays — документ на срок, в днях от сегодняшнего дня. 0 снимает
+	// срок (документ остаётся насовсем), отрицательное число — ошибка.
+	ExpiresInDays *int `json:"expires_in_days"`
 }
+
+// maxExpiryDays — предел срока. Дольше десяти лет «на время» уже не бывает,
+// а опечатка в лишний ноль превратила бы вечность в вечность незаметно.
+const maxExpiryDays = 3650
 
 // visibility разрешает обе формы: «visibility»: «public» и «public»: true.
 // Если пришли обе и они противоречат друг другу — это ошибка в запросе, а не
@@ -246,8 +300,7 @@ func (s *Server) moveDoc(w http.ResponseWriter, r *http.Request, u *models.User)
 		return
 	}
 
-	var doc models.Doc
-	err = s.db.Where("owner_id = ? AND path = ?", owner.ID, from).First(&doc).Error
+	doc, err := s.findDoc(owner.ID, from)
 	switch {
 	case errors.Is(err, gorm.ErrRecordNotFound):
 		writeErr(w, http.StatusNotFound, "нет такого документа")
@@ -260,8 +313,8 @@ func (s *Server) moveDoc(w http.ResponseWriter, r *http.Request, u *models.User)
 		writeErr(w, http.StatusForbidden, "переносить можно только свои документы")
 		return
 	}
-	if to == from {
-		writeJSON(w, http.StatusOK, s.viewDoc(&doc, owner.Username, u, true))
+	if to == doc.Path {
+		writeJSON(w, http.StatusOK, s.viewDoc(doc, owner.Username, u, true))
 		return
 	}
 
@@ -275,19 +328,28 @@ func (s *Server) moveDoc(w http.ResponseWriter, r *http.Request, u *models.User)
 		writeErr(w, http.StatusConflict, "по адресу "+to+" уже есть документ")
 		return
 	}
+	if busy, err := s.slugTaken(owner.ID, mdpath.Slug(to), to); err != nil {
+		writeErr(w, http.StatusInternalServerError, "база недоступна")
+		return
+	} else if busy != "" {
+		writeErr(w, http.StatusConflict,
+			"новый адрес в ссылке выглядит как «"+mdpath.Slug(to)+"» — так уже называется "+busy)
+		return
+	}
 
 	// Заголовок, оставшийся от старого имени (то есть не свой), едет с
 	// документом: иначе после переименования файла в списке висело бы
 	// прежнее имя, и завести своё человеку пришлось бы отдельно.
-	if doc.Title == defaultTitle(from) {
+	if doc.Title == defaultTitle(doc.Path) {
 		doc.Title = defaultTitle(to)
 	}
 	doc.Path = to
-	if err := s.db.Save(&doc).Error; err != nil {
+	doc.Slug = mdpath.Slug(to)
+	if err := s.db.Save(doc).Error; err != nil {
 		writeErr(w, http.StatusInternalServerError, "не смог перенести документ")
 		return
 	}
-	writeJSON(w, http.StatusOK, s.viewDoc(&doc, owner.Username, u, true))
+	writeJSON(w, http.StatusOK, s.viewDoc(doc, owner.Username, u, true))
 }
 
 // saveDoc — общий путь записи: проверки, создание или обновление, ответ. Им
@@ -315,30 +377,47 @@ func (s *Server) saveDoc(w http.ResponseWriter, u, owner *models.User, path stri
 		writeErr(w, http.StatusBadRequest, "заголовок длиннее 255 символов")
 		return
 	}
+	if in.ExpiresInDays != nil {
+		if *in.ExpiresInDays < 0 || *in.ExpiresInDays > maxExpiryDays {
+			writeErr(w, http.StatusBadRequest,
+				fmt.Sprintf("срок задаётся числом дней от 0 до %d", maxExpiryDays))
+			return
+		}
+	}
 
-	var doc models.Doc
-	err := s.db.Where("owner_id = ? AND path = ?", owner.ID, path).First(&doc).Error
+	// Пишем по ссылке, а не по адресу: адрес мог прийти латиницей из ссылки
+	// («dz/ii»), и по нему документ надо найти, а не завести второй.
+	doc, err := s.findDoc(owner.ID, path)
 	created := false
 	switch {
 	case errors.Is(err, gorm.ErrRecordNotFound):
 		created = true
-		doc = models.Doc{
+		doc = &models.Doc{
 			OwnerID:    owner.ID,
 			Path:       path,
+			Slug:       mdpath.Slug(path),
 			Title:      defaultTitle(path),
 			Visibility: models.VisPrivate, // по умолчанию всё закрыто
 			CommentsOn: true,
 		}
-		if in.Content != nil {
-			doc.Content = *in.Content
-		}
 	case err != nil:
 		writeErr(w, http.StatusInternalServerError, "база недоступна")
 		return
-	default:
-		if in.Content != nil {
-			doc.Content = *in.Content
-		}
+	}
+
+	// Свой слаг занят быть не может, чужой — может: тогда у двух документов
+	// была бы одна ссылка, и вторая вела бы не туда.
+	if busy, err := s.slugTaken(owner.ID, doc.Slug, doc.Path); err != nil {
+		writeErr(w, http.StatusInternalServerError, "база недоступна")
+		return
+	} else if busy != "" {
+		writeErr(w, http.StatusConflict,
+			"адрес "+doc.Path+" в ссылке выглядит как «"+doc.Slug+"» — так уже называется "+busy)
+		return
+	}
+
+	if in.Content != nil {
+		doc.Content = *in.Content
 	}
 
 	if in.Title != nil {
@@ -353,8 +432,18 @@ func (s *Server) saveDoc(w http.ResponseWriter, u, owner *models.User, path stri
 	if in.CommentsRequireAuth != nil {
 		doc.CommentsRequireAuth = *in.CommentsRequireAuth
 	}
+	// Срок отсчитывается от сегодняшнего дня: «удалить через 7 дней» — это то,
+	// что человек и имеет в виду, а не «в 14:37 седьмого дня».
+	if in.ExpiresInDays != nil {
+		if *in.ExpiresInDays == 0 {
+			doc.ExpiresAt = nil
+		} else {
+			until := time.Now().AddDate(0, 0, *in.ExpiresInDays)
+			doc.ExpiresAt = &until
+		}
+	}
 
-	if err := s.db.Save(&doc).Error; err != nil {
+	if err := s.db.Save(doc).Error; err != nil {
 		writeErr(w, http.StatusInternalServerError, "не смог сохранить документ")
 		return
 	}
@@ -362,7 +451,7 @@ func (s *Server) saveDoc(w http.ResponseWriter, u, owner *models.User, path stri
 	if created {
 		code = createdCode
 	}
-	writeJSON(w, code, s.viewDoc(&doc, owner.Username, u, true))
+	writeJSON(w, code, s.viewDoc(doc, owner.Username, u, true))
 }
 
 func (s *Server) deleteDoc(w http.ResponseWriter, r *http.Request, u *models.User) {
@@ -380,16 +469,21 @@ func (s *Server) deleteDoc(w http.ResponseWriter, r *http.Request, u *models.Use
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	res := s.db.Where("owner_id = ? AND path = ?", owner.ID, path).Delete(&models.Doc{})
-	if res.Error != nil {
-		writeErr(w, http.StatusInternalServerError, "не смог удалить документ")
-		return
-	}
-	if res.RowsAffected == 0 {
+	// Удаляем по ссылке: адрес мог прийти и латиницей, и кириллицей.
+	doc, err := s.findDoc(owner.ID, path)
+	if errors.Is(err, gorm.ErrRecordNotFound) {
 		writeErr(w, http.StatusNotFound, "нет такого документа")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "path": path})
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "база недоступна")
+		return
+	}
+	if err := s.db.Delete(doc).Error; err != nil {
+		writeErr(w, http.StatusInternalServerError, "не смог удалить документ")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "path": doc.Path})
 }
 
 // defaultTitle — заголовок из имени файла, если своего не дали.

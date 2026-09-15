@@ -32,6 +32,9 @@ func main() {
 	if err := store.Migrate(db); err != nil {
 		log.Fatalf("миграция схемы: %v", err)
 	}
+	if err := store.EnsureSlugs(db); err != nil {
+		log.Printf("латинские адреса: %v", err)
+	}
 	if err := store.PurgeExpired(db); err != nil {
 		log.Printf("чистка сессий: %v", err)
 	}
@@ -54,6 +57,23 @@ func main() {
 		for range time.Tick(6 * time.Hour) {
 			if err := store.PurgeExpired(db); err != nil {
 				log.Printf("чистка сессий: %v", err)
+			}
+		}
+	}()
+
+	// Документы на срок подметаем чаще: ссылку на такой документ уже отдали
+	// человеку, и «исчезнет после четверга» должно случиться в четверг, а не
+	// через полгода в ближайшую уборку. Пока подметатель не прошёл, документ
+	// всё равно не открывается — срок проверяется на каждом запросе.
+	go func() {
+		for range time.Tick(15 * time.Minute) {
+			n, err := store.PurgeExpiredDocs(db, time.Now())
+			if err != nil {
+				log.Printf("чистка просроченных документов: %v", err)
+				continue
+			}
+			if n > 0 {
+				log.Printf("стёрто просроченных документов: %d", n)
 			}
 		}
 	}()

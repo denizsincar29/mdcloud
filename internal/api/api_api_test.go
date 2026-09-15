@@ -116,8 +116,13 @@ func TestPostDocSavesUnderAccount(t *testing.T) {
 	if doc["owner"] != "deniz" || doc["path"] != "ДЗ/ИИ/задачи" {
 		t.Errorf("документ лёг не туда: %v", doc)
 	}
-	if url, _ := doc["url"].(string); !strings.HasSuffix(url, "/deniz/ДЗ/ИИ/задачи") {
+	// В ссылке адрес латиницей: кириллица в ней превратилась бы в «%D0%94…»,
+	// и такую ссылку нельзя ни продиктовать, ни прочитать с экрана.
+	if url, _ := doc["url"].(string); !strings.HasSuffix(url, "/deniz/dz/ii/zadachi") {
 		t.Errorf("в ответе странный адрес: %v", doc["url"])
+	}
+	if doc["slug"] != "dz/ii/zadachi" {
+		t.Errorf("слаг документа: %v, ждали dz/ii/zadachi", doc["slug"])
 	}
 
 	// Открытый документ виден анонимно, закрытый — нет.

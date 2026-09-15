@@ -16,6 +16,7 @@ import (
 
 	"github.com/denizsincar29/mdcloud/internal/api"
 	"github.com/denizsincar29/mdcloud/internal/config"
+	"github.com/denizsincar29/mdcloud/internal/models"
 	"github.com/denizsincar29/mdcloud/internal/store"
 )
 
@@ -28,6 +29,15 @@ func newTestServer(t *testing.T) *httptest.Server {
 // newTestServerWith — тот же сервер, но с правкой настроек: тестам про
 // приглашения нужна закрытая регистрация, тестам про куку — своя.
 func newTestServerWith(t *testing.T, tweak func(*config.Config)) *httptest.Server {
+	t.Helper()
+	srv, _ := newTestServerDB(t, tweak)
+	return srv
+}
+
+// newTestServerDB — сервер вместе с базой. База нужна там, где состояние
+// нельзя создать через API: истёкший срок наступает сам, со временем, и
+// подделать его в тесте можно только в таблице.
+func newTestServerDB(t *testing.T, tweak func(*config.Config)) (*httptest.Server, *gorm.DB) {
 	t.Helper()
 	name := strings.NewReplacer("/", "_", " ", "_").Replace(t.Name())
 	db, err := gorm.Open(sqlite.Open("file:"+name+"?mode=memory&cache=shared"),
@@ -56,7 +66,7 @@ func newTestServerWith(t *testing.T, tweak func(*config.Config)) *httptest.Serve
 	}
 	srv := httptest.NewServer(api.New(cfg, db).Handler())
 	t.Cleanup(srv.Close)
-	return srv
+	return srv, db
 }
 
 // opts — чем запрос отличается от обычного: токен, кука сессии, источник.
@@ -199,6 +209,142 @@ func TestDocVisibilityAndOwnership(t *testing.T) {
 	}
 	if st, _ := req(t, srv, "GET", docPath, deniz, nil); st != http.StatusNotFound {
 		t.Errorf("удалённый документ всё ещё отдаётся: %d", st)
+	}
+}
+
+// Адрес документа живёт в двух видах: каким его набрал человек и каким он
+// попадает в ссылку. Вести они должны к одному документу — иначе правка по
+// ссылке заводила бы второй.
+func TestDocOpensBySlug(t *testing.T) {
+	srv := newTestServer(t)
+	deniz := register(t, srv, "deniz", "parol1234")
+
+	st, doc := req(t, srv, "PUT", "/api/docs/deniz/ДЗ/ИИ/задачи", deniz,
+		map[string]any{"content": "# Задачи", "public": true})
+	if st != http.StatusOK {
+		t.Fatalf("создание: %d %v", st, doc)
+	}
+	if doc["slug"] != "dz/ii/zadachi" {
+		t.Fatalf("слаг: %v, ждали dz/ii/zadachi", doc["slug"])
+	}
+
+	st, doc = req(t, srv, "GET", "/api/docs/deniz/dz/ii/zadachi", "", nil)
+	if st != http.StatusOK {
+		t.Fatalf("документ по слагу: %d %v", st, doc)
+	}
+	if doc["path"] != "ДЗ/ИИ/задачи" {
+		t.Errorf("слаг привёл не к тому документу: %v", doc["path"])
+	}
+
+	// Регистр в ссылке не важен: адрес — это адрес.
+	if st, _ := req(t, srv, "GET", "/api/docs/deniz/DZ/II/ZADACHI", "", nil); st != http.StatusOK {
+		t.Errorf("слаг в верхнем регистре: %d, ждали 200", st)
+	}
+
+	// Правка по слагу правит тот же документ — второй не заводится.
+	if st, _ := req(t, srv, "PUT", "/api/docs/deniz/dz/ii/zadachi", deniz,
+		map[string]any{"content": "новое"}); st != http.StatusOK {
+		t.Fatalf("правка по слагу: %d", st)
+	}
+	st, list := req(t, srv, "GET", "/api/docs", deniz, nil)
+	if st != http.StatusOK {
+		t.Fatalf("список: %d %v", st, list)
+	}
+	docs, _ := list["docs"].([]any)
+	if len(docs) != 1 {
+		t.Errorf("правка по слагу завела второй документ: %d", len(docs))
+	}
+
+	// Удаление по слагу тоже попадает в цель.
+	if st, _ := req(t, srv, "DELETE", "/api/docs/deniz/dz/ii/zadachi", deniz, nil); st != http.StatusOK {
+		t.Errorf("удаление по слагу: %d, ждали 200", st)
+	}
+}
+
+// Две ссылки на один документ — не ссылки. Переезд на адрес, который в
+// ссылке выглядит как чужой, отбивается.
+func TestSlugCollisionRefused(t *testing.T) {
+	srv := newTestServer(t)
+	deniz := register(t, srv, "deniz", "parol1234")
+
+	if st, _ := req(t, srv, "PUT", "/api/docs/deniz/ДЗ", deniz, map[string]any{"content": "домашка"}); st != http.StatusOK {
+		t.Fatalf("создание ДЗ: %d", st)
+	}
+	if st, _ := req(t, srv, "PUT", "/api/docs/deniz/отчёт", deniz, map[string]any{"content": "отчёт"}); st != http.StatusOK {
+		t.Fatalf("создание отчёта: %d", st)
+	}
+	st, body := req(t, srv, "PATCH", "/api/docs/deniz/отчёт", deniz, map[string]any{"path": "dz"})
+	if st != http.StatusConflict {
+		t.Fatalf("переезд на занятый слаг: %d %v, ждали 409", st, body)
+	}
+}
+
+// Документ на срок: «через неделю его здесь не будет» — это обещание,
+// которое исполняет подметатель.
+func TestDocLivesUntilItsDay(t *testing.T) {
+	srv, db := newTestServerDB(t, nil)
+	deniz := register(t, srv, "deniz", "parol1234")
+
+	const docPath = "/api/docs/deniz/ДЗ"
+	st, doc := req(t, srv, "PUT", docPath, deniz,
+		map[string]any{"content": "домашка", "public": true, "expires_in_days": 7})
+	if st != http.StatusOK {
+		t.Fatalf("создание на срок: %d %v", st, doc)
+	}
+	if doc["expires_at"] == nil {
+		t.Fatal("срок не проставился")
+	}
+	if doc["visibility"] != "public" {
+		t.Errorf("срок сломал видимость: %v", doc["visibility"])
+	}
+
+	// Срок снимается нулём — документ остаётся насовсем.
+	st, doc = req(t, srv, "PUT", docPath, deniz, map[string]any{"expires_in_days": 0})
+	if st != http.StatusOK {
+		t.Fatalf("снятие срока: %d %v", st, doc)
+	}
+	if doc["expires_at"] != nil {
+		t.Errorf("срок не снялся: %v", doc["expires_at"])
+	}
+	// Опечатка в сроке — отказ, а не «вечность» незаметно.
+	if st, _ := req(t, srv, "PUT", docPath, deniz, map[string]any{"expires_in_days": 100000}); st != http.StatusBadRequest {
+		t.Errorf("срок в 274 года: %d, ждали 400", st)
+	}
+
+	// Истёкшее состояние приходит со временем, поэтому ставим его в таблице.
+	past := time.Now().Add(-time.Hour)
+	if err := db.Model(&models.Doc{}).Where("path = ?", "ДЗ").
+		Update("expires_at", past).Error; err != nil {
+		t.Fatalf("подделка срока: %v", err)
+	}
+	if st, _ := req(t, srv, "GET", docPath, "", nil); st != http.StatusNotFound {
+		t.Errorf("истёкший документ отдаётся анониму: %d, ждали 404", st)
+	}
+	if st, _ := req(t, srv, "GET", docPath, deniz, nil); st != http.StatusNotFound {
+		t.Errorf("истёкший документ отдаётся хозяину: %d, ждали 404", st)
+	}
+	st, list := req(t, srv, "GET", "/api/docs", deniz, nil)
+	if st != http.StatusOK {
+		t.Fatalf("список: %d", st)
+	}
+	if docs, _ := list["docs"].([]any); len(docs) != 0 {
+		t.Errorf("истёкший документ висит в списке: %d", len(docs))
+	}
+
+	// Подметатель стирает его совсем.
+	n, err := store.PurgeExpiredDocs(db, time.Now())
+	if err != nil {
+		t.Fatalf("подметатель: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("подметатель стёр %d документов, ждали 1", n)
+	}
+	var left int64
+	if err := db.Unscoped().Model(&models.Doc{}).Count(&left).Error; err != nil {
+		t.Fatalf("подсчёт: %v", err)
+	}
+	if left != 0 {
+		t.Errorf("после подметателя осталось документов: %d", left)
 	}
 }
 

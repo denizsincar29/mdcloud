@@ -51,10 +51,26 @@ function cleanPath(raw) {
     .join("/");
 }
 
-// docHref — адрес документа на сайте: владелец и каждый сегмент пути
-// экранируются по отдельности (в именах бывает кириллица и «/» в сегменте).
-function docHref(owner, path) {
-  return "/" + ownerPath("", owner, path);
+// docHref — адрес документа на сайте. В ссылке адрес идёт латиницей (slug):
+// русский путь в ней превратился бы в «%D0%94%D0%97…», и такую ссылку нельзя
+// ни продиктовать голосом, ни прочитать с экрана. Старый адрес сервер тоже
+// понимает, поэтому розданные раньше кириллические ссылки не ломаются.
+// Владелец и каждый сегмент экранируются по отдельности («/» бывает и внутри
+// сегмента).
+function docHref(owner, path, slug) {
+  return "/" + ownerPath("", owner, slug || path);
+}
+
+// docAddress — адрес документа так, как он выглядит в ссылке: то же самое, но
+// без ведущего слэша, — чтобы показать человеку и дать продиктовать.
+function docAddress(doc) {
+  return doc.owner + "/" + (doc.slug || doc.path);
+}
+
+// untilText — дата, до которой документ живёт. Считаем по календарю, а не по
+// остатку часов: «удалить через неделю» — это число, которое человек назвал.
+function untilText(when) {
+  return new Date(when).toLocaleDateString("ru-RU");
 }
 
 // ownerPath — «<префикс><владелец>/<путь>» с экранированием по сегментам:
@@ -534,7 +550,7 @@ async function openRegister(invite) {
 function docRow(owner, doc, folder) {
   const li = document.createElement("li");
   const a = document.createElement("a");
-  a.href = docHref(owner, doc.path);
+  a.href = docHref(owner, doc.path, doc.slug);
   const leaf = folder === "/" ? doc.path : doc.path.slice(folder.length + 1);
   a.textContent = doc.title || leaf;
   li.append(a);
@@ -543,6 +559,14 @@ function docRow(owner, doc, folder) {
     mark.className = "meta";
     mark.textContent = " — закрытый";
     li.append(mark);
+  }
+  // Документ на срок помечаем в списке: иначе о нём не вспомнить, а он возьмёт
+  // и пропадёт — вместе с тем, что в нём было написано.
+  if (doc.expires_at) {
+    const until = document.createElement("span");
+    until.className = "meta";
+    until.textContent = " — до " + untilText(doc.expires_at);
+    li.append(until);
   }
   li.addEventListener("click", (event) => {
     if (event.target.closest("a")) return; // по ссылке — обычный переход
@@ -607,10 +631,20 @@ async function openDoc(owner, path) {
   el("doc-title").textContent = doc.title || doc.path;
   document.title = (doc.title || doc.path) + " — mdcloud";
   el("doc-meta").textContent = [
-    "Адрес: " + owner + "/" + doc.path,
+    "Адрес: " + docAddress(doc),
     doc.visibility === "public" ? "публичный" : "закрытый",
     "обновлён " + new Date(doc.updated_at).toLocaleString("ru-RU"),
   ].join(" · ");
+
+  // Про срок говорим всем, кто открыл документ, — и хозяину, и читателю:
+  // «домашка до пятницы» перестаёт открываться в срок, и тот, кому её отдали,
+  // должен это видеть заранее, а не гадать, куда она делась.
+  const line = el("doc-expiry");
+  line.hidden = !doc.expires_at;
+  if (doc.expires_at) {
+    line.textContent = "Документ удалится " + untilText(doc.expires_at) +
+      " — после этого ссылка перестанет открываться.";
+  }
 
   const body = el("doc-body");
   try {
@@ -630,7 +664,9 @@ async function openDoc(owner, path) {
   el("edit").hidden = !doc.can_edit;
   el("toggle-vis").hidden = !doc.can_edit;
   el("rename-toggle").hidden = !doc.can_edit;
+  el("expiry-toggle").hidden = !doc.can_edit;
   el("rename-form").hidden = true;
+  el("expiry-form").hidden = true;
   if (doc.can_edit) {
     el("toggle-vis").textContent =
       doc.visibility === "public" ? "Сделать закрытым" : "Сделать публичным";
@@ -1030,9 +1066,61 @@ el("rename-form").addEventListener("submit", async (event) => {
     const doc = await api(apiPath(owner, from), { method: "PATCH", body: { path: to } });
     // Адрес страницы тоже переезжает: иначе F5 вернул бы старую ссылку, и
     // «скопировать адрес» из браузера отдал бы документ по старому пути.
-    history.replaceState(null, "", docHref(owner, doc.path));
+    history.replaceState(null, "", docHref(owner, doc.path, doc.slug));
     await openDoc(owner, doc.path);
-    status("Документ перенесён: " + doc.path);
+    status("Документ перенесён: " + docAddress(doc));
+  } catch (err) {
+    fail(err);
+  }
+});
+
+// Срок хранения — та же правка документа, что и видимость: PUT с одним полем,
+// остальное не трогаем. Срок считается от сегодняшнего дня, поэтому в форме
+// выбирают «неделю» или «месяц», а не дату в календаре.
+//
+// Поле подставляем по текущему сроку: у документа на месяц в форме стоит
+// «месяц», а не первая строка списка — иначе «сохранить» без правок переселило
+// бы срок на неделю.
+el("expiry-toggle").addEventListener("click", () => {
+  const form = el("expiry-form");
+  form.hidden = !form.hidden;
+  if (form.hidden) return;
+  el("expiry-days").value = String(expiryDays(state.doc));
+  el("expiry-days").focus();
+  status("Сколько документ живёт. Enter — сохранить, Отмена — оставить как было.");
+});
+
+// expiryDays — ближайший к сроку документа пункт списка. Своих чисел в форме
+// нет и не надо: «через 37 дней» человеку не нужно, а показать не то, что
+// стоит, — хуже, чем показать приблизительно.
+function expiryDays(doc) {
+  if (!doc.expires_at) return 0;
+  const left = Math.round((new Date(doc.expires_at).getTime() - Date.now()) / 86400000);
+  if (left <= 0) return 0;
+  const values = [...el("expiry-days").options]
+    .map((o) => Number(o.value))
+    .filter((v) => v > 0);
+  let best = values[0];
+  for (const v of values) if (Math.abs(v - left) < Math.abs(best - left)) best = v;
+  return best;
+}
+
+el("expiry-cancel").addEventListener("click", () => {
+  el("expiry-form").hidden = true;
+  el("expiry-toggle").focus();
+  status("Срок не менялся.");
+});
+
+el("expiry-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const days = Number(el("expiry-days").value) || 0;
+  try {
+    const doc = await api(apiPath(state.doc.owner, state.doc.path),
+      { method: "PUT", body: { expires_in_days: days } });
+    await openDoc(doc.owner, doc.path);
+    status(days === 0
+      ? "Документ остаётся насовсем."
+      : "Документ удалится " + untilText(doc.expires_at) + ".");
   } catch (err) {
     fail(err);
   }

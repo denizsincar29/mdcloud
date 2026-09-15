@@ -111,16 +111,34 @@
   <section id="doc" hidden aria-labelledby="doc-title">
     <h1 id="doc-title"></h1>
     <p id="doc-meta" class="meta"></p>
+    <p id="doc-expiry" class="meta" hidden></p>
     <p class="actions">
       <button id="edit" type="button" hidden>Редактировать</button>
       <button id="toggle-vis" type="button" hidden></button>
       <button id="rename-toggle" type="button" hidden>Переименовать</button>
+      <button id="expiry-toggle" type="button" hidden>Срок хранения</button>
     </p>
     <form id="rename-form" hidden>
       <label for="rename-path">Новый адрес документа — путь в облаке</label>
       <input id="rename-path" name="path" autocomplete="off" required>
       <button type="submit">Перенести</button>
       <button id="rename-cancel" type="button">Отмена</button>
+    </form>
+    <form id="expiry-form" hidden>
+      <label for="expiry-days">Хранить документ</label>
+      <select id="expiry-days" name="days">
+        <option value="1">день</option>
+        <option value="7" selected>неделю</option>
+        <option value="30">месяц</option>
+        <option value="90">три месяца</option>
+        <option value="365">год</option>
+        <option value="0">бессрочно</option>
+      </select>
+      <button type="submit">Сохранить срок</button>
+      <button id="expiry-cancel" type="button">Отмена</button>
+      <p class="hint">Документ со сроком открывается как обычно, пока срок идёт, а потом
+        исчезает совсем: и содержимое, и комментарии. Так отдают домашку или черновик —
+        отдать и не думать, что оно осталось в облаке навсегда.</p>
     </form>
     <article id="doc-body" class="markdown"></article>
 

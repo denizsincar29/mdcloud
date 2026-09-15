@@ -148,10 +148,10 @@ An assistant-readable walkthrough of the whole surface lives at
 | `GET` | `/api/me` | signed in | current user and document count |
 | `GET` | `/api/config` | anyone | registration mode (`first`/`open`/`invite`/`closed`), cloud and editor URLs |
 | `GET` | `/api/docs` | signed in | all of your documents, private included |
-| `POST` | `/api/docs` | signed in | save `{path, content?, title?, public?, visibility?, …}` under the caller → `201` created / `200` updated |
+| `POST` | `/api/docs` | signed in | save `{path, content?, title?, public?, visibility?, expires_in_days?, …}` under the caller → `201` created / `200` updated |
 | `GET` | `/api/docs/{owner}` | anyone | that user's public documents |
 | `GET` | `/api/docs/{owner}/{path...}` | anyone | one document with its markdown |
-| `PUT` | `/api/docs/{owner}/{path...}` | owner | create/update `{title?, content?, visibility?, comments_on?, comments_require_auth?}` |
+| `PUT` | `/api/docs/{owner}/{path...}` | owner | create/update `{title?, content?, visibility?, comments_on?, comments_require_auth?, expires_in_days?}` |
 | `PATCH` | `/api/docs/{owner}/{path...}` | owner | `{path}` — перенести на другой адрес (`409`, если адрес занят) |
 | `DELETE` | `/api/docs/{owner}/{path...}` | owner | soft delete |
 | `GET` | `/api/comments/{owner}/{path...}` | anyone | comments (private docs excluded) |
@@ -167,7 +167,28 @@ An assistant-readable walkthrough of the whole surface lives at
 | `GET` | `/api/health` | anyone | liveness |
 
 Paths are normalised: no leading slash, no `.`/`..` segments, at most 5 nested
-folders, letters/digits/`.`/`-`/`_`/`+`/`()` in a segment.
+folders, letters/digits/`.`/`-`/`_`/`+`/`()` in a segment. Cyrillic is fine —
+paths are what the owner typed, and they are the key (`idx_doc_owner_path`).
+
+### Two forms of an address: `path` and `slug`
+
+A document has a Russian `path` (`ДЗ/ИИ/задачи`) and a derived Latin `slug`
+(`dz/ii/zadachi`, `internal/mdpath`). The slug is what the link carries: Cyrillic
+in a URL becomes `%D0%94…`, which cannot be dictated or read off the screen.
+Every lookup (`GET`/`PUT`/`PATCH`/`DELETE`) accepts either form and resolves to
+the same row, so links handed out before the slug existed keep working. The slug
+is recomputed from the path on every write and backfilled for old rows at
+startup, so the two cannot drift; two paths with one slug (`ДЗ` and `dz`) are
+refused with `409` — a link must point at exactly one document.
+
+### Documents with a term
+
+`expires_in_days` (`0` clears it, max 3650) turns a document into a temporary
+one — homework for a teacher, a draft to share and forget. While the term runs
+it opens like any other; once `expires_at` passes the document answers `404`
+even for its owner and drops out of the lists, and a sweeper running every 15
+minutes hard-deletes the row and its comments. Deletion is final on purpose:
+the point of a term is that the content is gone, not merely hidden.
 
 ## Invites
 
