@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
 # deploy.sh — разворачивает mdcloud на этом сервере: сборка, база, systemd.
 #
-# Всё сам, одним запуском:
+# Запускается от обычного пользователя, без sudo: скрипт сам зовёт sudo там,
+# где нужно (postgres, systemd, /etc/caddy). Пользователь сервиса — тот, кто
+# запустил скрипт; если запустить через sudo, им станет SUDO_USER.
+#
+# Что делает одним запуском:
 #   1. спрашивает настройки (домен, адрес редактора, база) и пишет .env,
 #      если его ещё нет — повторный запуск ничего не переспрашивает;
 #   2. собирает бинарь mdcloud из исходников;
-#   3. создаёт роль и базу в Postgres через `sudo -u postgres psql`, если их
-#      нет (пароль роли всегда приводится к тому, что в .env);
+#   3. создаёт роль и базу в Postgres, если их нет (пароль роли всегда
+#      приводится к тому, что в .env);
 #   4. создаёт systemd-сервис mdcloud и включает автозапуск;
 #   5. раскладывает web/ в /var/www/html/mdcloud и, если попросить, добавляет
 #      сайт в Caddyfile (с проверкой конфига и откатом при ошибке).
@@ -14,9 +18,9 @@
 # Идемпотентен: повторный запуск — это обычный редеплой.
 #
 # Использование:
-#   sudo ./deploy.sh                 — развернуть или обновить
-#   sudo ./deploy.sh --reconfigure   — переспросить настройки заново
-#   sudo ./deploy.sh --no-caddy      — не трогать Caddy
+#   ./deploy.sh                 — развернуть или обновить
+#   ./deploy.sh --reconfigure   — переспросить настройки заново
+#   ./deploy.sh --no-caddy      — не трогать Caddy
 #
 # Переменные окружения (все опциональны, имеют приоритет над .env):
 #   SERVICE_USER, MDCLOUD_DOMAIN, EDITOR_URL, MDCLOUD_ADDR,
@@ -35,12 +39,10 @@ for arg in "$@"; do
   case "$arg" in
     --reconfigure) RECONFIGURE=1 ;;
     --no-caddy)    WITH_CADDY=0 ;;
-    -h|--help)     sed -n '2,30p' "$0"; exit 0 ;;
+    -h|--help)     sed -n '2,28p' "$0"; exit 0 ;;
     *) die "непонятный аргумент: $arg" ;;
   esac
 done
-
-[[ ${EUID:-$(id -u)} -eq 0 ]] || die "запусти через sudo: sudo ./deploy.sh"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_DIR="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null || echo "$SCRIPT_DIR")"
@@ -52,11 +54,19 @@ STATIC_DEST="/var/www/html/mdcloud"
 UNIT="/etc/systemd/system/${SERVICE_NAME}.service"
 CADDYFILE="/etc/caddy/Caddyfile"
 
-# Владелец папки — он же пользователь сервиса: под root'ом это обычно deniz.
-SERVICE_USER="${SERVICE_USER:-${SUDO_USER:-$(stat -c '%U' "$APP_DIR")}}"
+# Сервис работает от того, кто разворачивает: и репозиторий, и .env, и
+# запущенный процесс принадлежат ему. Под root'а не лезем.
+SERVICE_USER="${SERVICE_USER:-${SUDO_USER:-$(id -un)}}"
 if [[ "$SERVICE_USER" == "root" ]]; then
-  die "сервис под root не заводим — задай SERVICE_USER=<юзер>"
+  die "сервис под root не заводим — запусти скрипт от своего пользователя"
 fi
+if [[ "$(id -un)" == "root" && -z "${SUDO_USER:-}" ]]; then
+  die "запусти от обычного пользователя (без sudo) — sudo скрипт позовёт сам"
+fi
+
+# Пароль sudo спросим один раз в начале, а не посреди работы.
+say "проверяю sudo"
+sudo -v || die "нужен sudo: postgres, systemd и /etc/caddy без него не настроить"
 
 # ── 1. Настройки ────────────────────────────────────────────────────────────
 ENV_FILE="$APP_DIR/.env"
@@ -104,7 +114,6 @@ MDCLOUD_COMMENT_LIMIT=10
 MDCLOUD_COMMENT_WINDOW=10m
 EOF
   chmod 600 "$ENV_FILE"
-  chown "$SERVICE_USER" "$ENV_FILE" 2>/dev/null || true
   say "записал $ENV_FILE"
 else
   say "читаю настройки из $ENV_FILE"
@@ -125,13 +134,14 @@ echo "    сервис:   $SERVICE_NAME (пользователь $SERVICE_USER)
 echo "    облако:   ${MDCLOUD_BASE_URL:-?}"
 echo "    редактор: ${MDCLOUD_EDITOR_URL:-?}"
 echo "    база:     $DB_NAME (роль $DB_USER @ $DB_HOST:$DB_PORT)"
+echo "    статика:  $STATIC_DEST"
 
 # ── 2. Сборка ───────────────────────────────────────────────────────────────
 find_go() {
   if [[ -n "${GO:-}" ]]; then echo "$GO"; return; fi
   local c
   for c in "$(command -v go 2>/dev/null || true)" /usr/local/go/bin/go \
-           /usr/lib/go-*/bin/go "/home/$SERVICE_USER/go-root/bin/go"; do
+           /usr/lib/go-*/bin/go "$HOME/go-root/bin/go"; do
     if [[ -n "$c" && -x "$c" ]]; then
       echo "$c"
       return
@@ -140,19 +150,17 @@ find_go() {
 }
 GO_BIN="$(find_go || true)"
 if [[ -z "$GO_BIN" ]]; then
-  warn "Go не найден — ставлю в ~$SERVICE_USER/go-root (как в других деплоерах)"
-  sudo -u "$SERVICE_USER" -H bash -c '
-    set -e
-    arch=$(uname -m); case "$arch" in aarch64|arm64) a=arm64 ;; x86_64) a=amd64 ;; *) echo "нет сборки для $arch" >&2; exit 1 ;; esac
-    curl -fsSL -o /tmp/go-mdcloud.tgz "https://go.dev/dl/go1.27.0.linux-$a.tar.gz"
-    mkdir -p "$HOME/go-root"
-    tar -C "$HOME/go-root" --strip-components=1 -xzf /tmp/go-mdcloud.tgz
-    rm -f /tmp/go-mdcloud.tgz'
-  GO_BIN="/home/$SERVICE_USER/go-root/bin/go"
+  warn "Go не найден — ставлю в ~/go-root (как в других деплоерах)"
+  arch=$(uname -m)
+  case "$arch" in aarch64|arm64) goarch=arm64 ;; x86_64) goarch=amd64 ;; *) die "нет сборки Go для $arch" ;; esac
+  curl -fsSL -o /tmp/go-mdcloud.tgz "https://go.dev/dl/go1.27.0.linux-$goarch.tar.gz"
+  mkdir -p "$HOME/go-root"
+  tar -C "$HOME/go-root" --strip-components=1 -xzf /tmp/go-mdcloud.tgz
+  rm -f /tmp/go-mdcloud.tgz
+  GO_BIN="$HOME/go-root/bin/go"
 fi
 say "сборка ($GO_BIN)"
-sudo -u "$SERVICE_USER" -H env "PATH=$(dirname "$GO_BIN"):$PATH" GOTOOLCHAIN=auto \
-  "$GO_BIN" build -o "$APP_DIR/$BIN_NAME" .
+GOTOOLCHAIN=auto "$GO_BIN" build -o "$APP_DIR/$BIN_NAME" .
 chmod 755 "$APP_DIR/$BIN_NAME"
 
 # ── 3. Postgres ─────────────────────────────────────────────────────────────
@@ -181,7 +189,8 @@ fi
 # ── 4. systemd ──────────────────────────────────────────────────────────────
 say "сервис $UNIT"
 if [[ ! -f "$UNIT" ]]; then
-  cat > "$UNIT" <<EOF
+  UNIT_TMP="$(mktemp)"
+  cat > "$UNIT_TMP" <<EOF
 [Unit]
 Description=mdcloud — облако markdown-документов
 After=network-online.target postgresql.service
@@ -201,21 +210,31 @@ PrivateTmp=true
 [Install]
 WantedBy=multi-user.target
 EOF
+  sudo install -m 644 -o root -g root "$UNIT_TMP" "$UNIT"
+  rm -f "$UNIT_TMP"
   echo "    создан"
 else
   echo "    уже есть — не трогаю"
 fi
-systemctl daemon-reload
-systemctl enable "$SERVICE_NAME" >/dev/null 2>&1 || true
-systemctl restart "$SERVICE_NAME"
+sudo systemctl daemon-reload
+sudo systemctl enable "$SERVICE_NAME" >/dev/null 2>&1 || true
+# restart, а не start: на редеплое сервис уже запущен, и без явного
+# перезапуска он остался бы крутиться старым бинарём.
+sudo systemctl restart "$SERVICE_NAME"
 
 # ── 5. Статика и Caddy ──────────────────────────────────────────────────────
 if [[ "$WITH_CADDY" == "1" ]]; then
   say "статика в $STATIC_DEST"
-  mkdir -p "$STATIC_DEST"
-  rsync -a --no-owner --no-group --delete "$APP_DIR/web/" "$STATIC_DEST/"
-  # Файлы должны быть читаемы Caddy: владелец — сервисный юзер, группа caddy.
-  chown -R "$SERVICE_USER":caddy "$STATIC_DEST" 2>/dev/null || chown -R "$SERVICE_USER" "$STATIC_DEST"
+  # /var/www/html помечен setgid-битом и группой caddy — файлы, созданные
+  # здесь, сразу получают нужную группу, sudo для этого не нужен.
+  if [[ -w "$(dirname "$STATIC_DEST")" ]]; then
+    mkdir -p "$STATIC_DEST"
+    rsync -a --no-owner --no-group --delete "$APP_DIR/web/" "$STATIC_DEST/"
+  else
+    sudo mkdir -p "$STATIC_DEST"
+    sudo rsync -a --no-owner --no-group --delete --chown="$SERVICE_USER":caddy \
+      "$APP_DIR/web/" "$STATIC_DEST/"
+  fi
 
   DOMAIN="$(echo "${MDCLOUD_BASE_URL:-}" | sed -e 's|^https\?://||' -e 's|/$||')"
   if [[ -z "$DOMAIN" ]]; then
@@ -226,9 +245,9 @@ if [[ "$WITH_CADDY" == "1" ]]; then
     echo "    сайт $DOMAIN в Caddyfile уже есть — не трогаю"
   else
     say "добавляю сайт $DOMAIN в $CADDYFILE"
-    CADDY_BACKUP="${CADDYFILE}.bak.$(date +%s)"
-    cp -a "$CADDYFILE" "$CADDY_BACKUP"
-    cat >> "$CADDYFILE" <<EOF
+    sudo cp -a "$CADDYFILE" "${CADDYFILE}.bak.$(date +%s)"
+    BLOCK_TMP="$(mktemp)"
+    cat > "$BLOCK_TMP" <<EOF
 
 # --- $SERVICE_NAME (добавлено deploy.sh) ---
 $DOMAIN {
@@ -252,19 +271,22 @@ $DOMAIN {
 	}
 }
 EOF
-    if caddy validate --config "$CADDYFILE" >/dev/null 2>&1; then
-      systemctl reload caddy
-      echo "    конфиг проверен, Caddy перечитан (копия прежнего: $CADDY_BACKUP)"
+    sudo tee -a "$CADDYFILE" < "$BLOCK_TMP" >/dev/null
+    rm -f "$BLOCK_TMP"
+    if sudo caddy validate --config "$CADDYFILE" >/dev/null 2>&1; then
+      sudo systemctl reload caddy
+      echo "    конфиг проверен, Caddy перечитан (копия прежнего: ${CADDYFILE}.bak.*)"
     else
-      cp -a "$CADDY_BACKUP" "$CADDYFILE"   # откат: без валидного конфига Caddy не поднимется
-      die "Caddy не принял конфиг — вернул прежний файл, смотри 'caddy validate'"
+      # Откат: без валидного конфига Caddy не поднимется после перезапуска.
+      sudo cp -a "$(ls -t "${CADDYFILE}".bak.* | head -1)" "$CADDYFILE"
+      die "Caddy не принял конфиг — вернул прежний файл, смотри 'sudo caddy validate'"
     fi
   fi
 fi
 
 # ── Итог ────────────────────────────────────────────────────────────────────
 sleep 1
-systemctl --no-pager --lines=10 status "$SERVICE_NAME" || true
+sudo systemctl --no-pager --lines=10 status "$SERVICE_NAME" || true
 echo
 say "готово"
 echo "    сервис:  systemctl status $SERVICE_NAME"
@@ -272,7 +294,6 @@ echo "    логи:    journalctl -u $SERVICE_NAME -f"
 echo "    API:     ${MDCLOUD_BASE_URL:-http://$MDCLOUD_ADDR}/api/health"
 if [[ -n "${MDCLOUD_BASE_URL:-}" ]]; then
   echo
-  echo "    Первый вход: регистрация открыта до создания первого пользователя —"
-  echo "    зайди на ${MDCLOUD_BASE_URL} и заведи себе аккаунт, дальше она закроется"
-  echo "    (если в .env стоит MDCLOUD_ALLOW_REGISTRATION=false)."
+  echo "    Первый вход: ${MDCLOUD_BASE_URL} — заведи себе аккаунт, он и станет"
+  echo "    хозяином облака (регистрация закрыта, если ALLOW_REGISTRATION=false)."
 fi
