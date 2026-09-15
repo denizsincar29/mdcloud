@@ -39,7 +39,7 @@ func Open(dsn string) (*gorm.DB, error) {
 func Migrate(db *gorm.DB) error {
 	return db.AutoMigrate(
 		&models.User{}, &models.Doc{}, &models.Comment{}, &models.Session{},
-		&models.Invite{}, &models.APIToken{})
+		&models.Invite{}, &models.APIToken{}, &models.DocShare{})
 }
 
 // EnsureSlugs проставляет адресам латинское представление для ссылок.

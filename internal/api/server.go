@@ -54,6 +54,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PATCH /api/docs/{owner}/{path...}", s.requireUser(s.moveDoc))
 	mux.HandleFunc("DELETE /api/docs/{owner}/{path...}", s.requireUser(s.deleteDoc))
 
+	mux.HandleFunc("GET /api/shared", s.requireUser(s.listSharedWithMe))
+	mux.HandleFunc("POST /api/share", s.requireUser(s.shareDoc))
+	mux.HandleFunc("DELETE /api/share", s.requireUser(s.unshareDoc))
+
 	mux.HandleFunc("GET /api/tokens", s.requireUser(s.listTokens))
 	mux.HandleFunc("POST /api/tokens", s.requireUser(s.createToken))
 	mux.HandleFunc("DELETE /api/tokens/{id}", s.requireUser(s.deleteToken))

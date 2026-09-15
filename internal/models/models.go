@@ -89,6 +89,19 @@ func (d *Doc) Expired(now time.Time) bool {
 	return d.ExpiresAt != nil && now.After(*d.ExpiresAt)
 }
 
+// DocShare — документ, отправленный человеку по имени.
+//
+// Так отдают написанное адресно: учительница пишет домашку и отправляет её
+// на юзернейм, не выкладывая в публичный доступ. Получателю — чтение и
+// комментарии, правка остаётся за хозяином: отправленный документ не
+// превращается в общий.
+type DocShare struct {
+	ID        uint      `gorm:"primarykey" json:"id"`
+	DocID     uint      `gorm:"uniqueIndex:idx_share_doc_user;not null" json:"doc_id"`
+	UserID    uint      `gorm:"uniqueIndex:idx_share_doc_user;not null" json:"user_id"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
 // Comment — комментарий: либо от залогиненного пользователя (AuthorID),
 // либо анонимный с именем (AuthorID = nil, Name заполнен).
 type Comment struct {

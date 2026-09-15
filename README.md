@@ -162,10 +162,13 @@ An assistant-readable walkthrough of the whole surface lives at
 | `GET` | `/api/docs` | signed in | all of your documents, private included |
 | `POST` | `/api/docs` | signed in | save `{path, content?, title?, public?, visibility?, expires_in_days?, …}` under the caller → `201` created / `200` updated |
 | `GET` | `/api/docs/{owner}` | anyone | that user's public documents |
-| `GET` | `/api/docs/{owner}/{path...}` | anyone | one document with its markdown |
+| `GET` | `/api/docs/{owner}/{path...}` | anyone | one document with its markdown (a private one only for its owner and its recipients; the owner's copy carries `shared_with`) |
 | `PUT` | `/api/docs/{owner}/{path...}` | owner | create/update `{title?, content?, visibility?, comments_on?, comments_require_auth?, expires_in_days?}` |
 | `PATCH` | `/api/docs/{owner}/{path...}` | owner | `{path}` — перенести на другой адрес (`409`, если адрес занят) |
 | `DELETE` | `/api/docs/{owner}/{path...}` | owner | soft delete |
+| `GET` | `/api/shared` | signed in | documents sent to you, newest first — no markdown |
+| `POST` | `/api/share` | owner | `{owner, path, username}` — send a document to a person |
+| `DELETE` | `/api/share?owner&path&username` | owner | take it back |
 | `GET` | `/api/comments/{owner}/{path...}` | anyone | comments (private docs excluded) |
 | `POST` | `/api/comments/{owner}/{path...}` | anyone | `{body, name?}` — name is required when anonymous |
 | `DELETE` | `/api/comments/{id}` | author or doc owner | delete a comment |
@@ -201,6 +204,27 @@ it opens like any other; once `expires_at` passes the document answers `404`
 even for its owner and drops out of the lists, and a sweeper running every 15
 minutes hard-deletes the row and its comments. Deletion is final on purpose:
 the point of a term is that the content is gone, not merely hidden.
+
+### Sending a document to a person
+
+A document can be addressed to one account by username instead of being made
+public. `POST /api/share` with `{owner, path, username}` writes a row into
+`doc_shares` (unique on `doc_id` + `user_id`, so sending twice to the same
+person is a no-op) and the document lands in the recipient's «Со мной поделились»
+list, which `GET /api/shared` feeds. Sending does not change `visibility`: the
+document stays private, and `GET /api/docs/{owner}/{path...}` answers `404` to
+anon and to everyone who is not the owner or a recipient. The recipient reads and
+comments but cannot edit — `can_edit` comes back `false` and `PUT` answers `403`;
+the owner keeps the pen and is the only one who sees `shared_with`. `DELETE
+/api/share` with the same coordinates takes the document back and access closes
+at once.
+
+Address and username travel in the body (or in the query string, which is what
+`DELETE` uses) rather than in the path: the document route ends in a `{path...}`
+wildcard, and nothing may follow it — plus one request shape then serves both
+sending and taking back. Unknown usernames answer `404`, sending to yourself
+`400`, and someone else's document `404` — the same answer as a missing one, so
+existence is never confirmed.
 
 ## Invites
 
@@ -274,7 +298,7 @@ uses. Nothing is loaded for documents without a ` ```desmos ` block.
 ```
 main.go                 wiring, startup, graceful shutdown
 internal/config         environment
-internal/models         users, docs, comments, sessions, invites, API keys
+internal/models         users, docs, comments, sessions, invites, API keys, shares
 internal/store          Postgres connection, AutoMigrate
 internal/auth           bcrypt, tokens, invite codes
 internal/mdpath         document path rules
@@ -296,8 +320,9 @@ go test ./...
 
 Tests run against an in-memory SQLite database, so they need neither Postgres
 nor the network. They cover document visibility, ownership, comment rules,
-first-user/admin rules, invite redemption and expiry, cookie flags, CSRF and
-CORS, token lifecycle and path validation.
+first-user/admin rules, invite redemption and expiry, sharing a document to a
+person (recipient reads, cannot edit, anon still gets `404`), cookie flags,
+CSRF and CORS, token lifecycle and path validation.
 
 The web page has its own smoke tests (no browser):
 
@@ -309,7 +334,8 @@ node web/test/md.test.mjs   # markdown → HTML: frontmatter, AsciiMath, formula
 
 `ui.test.cjs` drives registration, the invite link, issuing and revoking
 invites, the create-document button, the folder tree, renaming, the desmos
-frame and the error states against a stubbed API.
+frame, sending a document to a username and the read-only view a recipient gets,
+and the error states against a stubbed API.
 `md.test.mjs` checks what happens to a document on the way to the page —
 frontmatter goes, backticks survive as AsciiMath delimiters instead of turning
 into `<code>`, LaTeX reaches the page untouched — first against a stub, then

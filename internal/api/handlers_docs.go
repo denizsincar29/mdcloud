@@ -27,9 +27,12 @@ type docView struct {
 	CommentsRequireAuth bool       `json:"comments_require_auth"`
 	ExpiresAt           *time.Time `json:"expires_at,omitempty"`
 	CanEdit             bool       `json:"can_edit"`
-	URL                 string     `json:"url"`
-	CreatedAt           time.Time  `json:"created_at"`
-	UpdatedAt           time.Time  `json:"updated_at"`
+	// SharedWith — кому документ отправлен по юзернейму. Заполняется только
+	// хозяину: получателю список остальных получателей не нужен.
+	SharedWith []string  `json:"shared_with,omitempty"`
+	URL        string    `json:"url"`
+	CreatedAt  time.Time `json:"created_at"`
+	UpdatedAt  time.Time `json:"updated_at"`
 }
 
 func (s *Server) viewDoc(d *models.Doc, ownerName string, viewer *models.User, withContent bool) docView {
@@ -113,8 +116,11 @@ func (s *Server) docForRequest(w http.ResponseWriter, r *http.Request, viewer *m
 		writeErr(w, http.StatusInternalServerError, "база недоступна")
 		return nil, nil, false
 	}
+	// Приватный документ открыт хозяину и тому, кому его отправили; для
+	// остальных его не существует.
 	if errors.Is(err, gorm.ErrRecordNotFound) ||
-		(!doc.IsPublic() && (viewer == nil || viewer.ID != owner.ID)) {
+		(!doc.IsPublic() && (viewer == nil ||
+			(viewer.ID != owner.ID && !s.sharedWith(doc.ID, viewer.ID)))) {
 		writeErr(w, http.StatusNotFound, "нет такого документа")
 		return nil, nil, false
 	}
@@ -170,7 +176,18 @@ func (s *Server) getDoc(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	writeJSON(w, http.StatusOK, s.viewDoc(doc, owner.Username, viewer, true))
+	view := s.viewDoc(doc, owner.Username, viewer, true)
+	// Хозяину виднее: он должен видеть, кому документ уже отправлен, иначе
+	// отправка второй раз тому же человеку выглядит как потерянная.
+	if viewer != nil && viewer.ID == owner.ID {
+		names, err := s.shareNames(doc.ID)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "база недоступна")
+			return
+		}
+		view.SharedWith = names
+	}
+	writeJSON(w, http.StatusOK, view)
 }
 
 // ---------------------------------------------------------------- запись

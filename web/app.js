@@ -639,7 +639,52 @@ async function openIndex(owner) {
     li.textContent = "Пусто.";
     list.append(li);
   }
+  // Присланное показываем только у себя: это чужой список, и ходить в него
+  // со страницы другого человека незачем.
+  await paintShared(mine);
   el("main").focus();
+}
+
+// paintShared — раздел «Со мной поделились»: документы, которые отправили мне.
+// Отдельно от «моих документов»: там владение и правка, а тут чужая работа,
+// которую дали почитать.
+async function paintShared(mine) {
+  const block = el("shared-block");
+  const list = el("shared-list");
+  block.hidden = !mine;
+  list.replaceChildren();
+  if (!mine) return;
+  let data;
+  try {
+    data = await api("/api/shared");
+  } catch (err) {
+    block.hidden = true;
+    return;
+  }
+  for (const doc of data.docs) {
+    const li = document.createElement("li");
+    const a = document.createElement("a");
+    a.href = docHref(doc.owner, doc.path, doc.slug);
+    a.textContent = (doc.title || doc.path) + " — от " + doc.owner;
+    li.append(a);
+    if (doc.expires_at) {
+      const until = document.createElement("span");
+      until.className = "meta";
+      until.textContent = " — до " + untilText(doc.expires_at);
+      li.append(until);
+    }
+    li.addEventListener("click", (event) => {
+      if (event.target.closest("a")) return;
+      a.click();
+    });
+    list.append(li);
+  }
+  if (!data.docs.length) {
+    const li = document.createElement("li");
+    li.className = "meta";
+    li.textContent = "Пока никто ничего не присылал.";
+    list.append(li);
+  }
 }
 
 async function openDoc(owner, path) {
@@ -649,9 +694,14 @@ async function openDoc(owner, path) {
 
   el("doc-title").textContent = doc.title || doc.path;
   document.title = (doc.title || doc.path) + " — mdcloud";
+  // Свой документ — «приватный», присланный — «прислан вам»: иначе читатель
+  // гадает, почему чужая работа закрыта для остальных, а открыта ему.
+  const own = !state.user || state.user.username === doc.owner;
   el("doc-meta").textContent = [
     "Адрес: " + docAddress(doc),
-    doc.visibility === "public" ? "публичный" : "приватный",
+    doc.visibility === "public"
+      ? "публичный"
+      : own ? "приватный" : "прислан вам",
     "обновлён " + new Date(doc.updated_at).toLocaleString("ru-RU"),
   ].join(" · ");
 
@@ -684,8 +734,13 @@ async function openDoc(owner, path) {
   el("toggle-vis").hidden = !doc.can_edit;
   el("rename-toggle").hidden = !doc.can_edit;
   el("expiry-toggle").hidden = !doc.can_edit;
+  el("share-toggle").hidden = !doc.can_edit;
   el("rename-form").hidden = true;
   el("expiry-form").hidden = true;
+  el("share-form").hidden = true;
+  // Кому документ уже отправлен — видно сразу, без раскрытия формы: иначе
+  // отправка второй раз тому же человеку выглядит как потерянная.
+  paintShareList(doc.shared_with || []);
   if (doc.can_edit) {
     el("toggle-vis").textContent =
       doc.visibility === "public" ? "Сделать приватным" : "Сделать публичным";
@@ -1148,6 +1203,80 @@ el("expiry-form").addEventListener("submit", async (event) => {
     fail(err);
   }
 });
+
+// Отправка документа человеку: юзернейм, и документ появляется у него в
+// разделе «Со мной поделились». Публичным он от этого не становится —
+// отправка адресная, а не публикация.
+el("share-toggle").addEventListener("click", () => {
+  const form = el("share-form");
+  form.hidden = !form.hidden;
+  if (form.hidden) return;
+  el("share-username").value = "";
+  el("share-username").focus();
+  status("Кому отправить документ. Напишите юзернейм и нажмите Enter.");
+});
+
+el("share-cancel").addEventListener("click", () => {
+  el("share-form").hidden = true;
+  el("share-toggle").focus();
+  status("Никому не отправлено.");
+});
+
+el("share-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const username = el("share-username").value.trim();
+  if (!username) {
+    status("Напишите юзернейм.");
+    return;
+  }
+  try {
+    const res = await api("/api/share", {
+      method: "POST",
+      body: { owner: state.doc.owner, path: state.doc.path, username },
+    });
+    await openDoc(state.doc.owner, state.doc.path);
+    status(res.message || "Документ отправлен.");
+  } catch (err) {
+    fail(err);
+  }
+});
+
+// paintShareList — кому документ отправлен, с возможностью забрать обратно.
+// Список стоит рядом с кнопкой и без раскрытия формы: хозяин должен видеть,
+// у кого документ уже есть.
+function paintShareList(names) {
+  const list = el("share-list");
+  list.replaceChildren();
+  const block = el("share-block");
+  block.hidden = names.length === 0;
+  if (!names.length) return;
+  el("share-summary").textContent = names.length === 1
+    ? "Документ отправлен одному человеку:"
+    : "Документ отправлен:";
+  for (const name of names) {
+    const li = document.createElement("li");
+    const who = document.createElement("span");
+    who.textContent = name;
+    const take = document.createElement("button");
+    take.type = "button";
+    take.textContent = "Забрать";
+    take.addEventListener("click", async () => {
+      try {
+        const res = await api(
+          "/api/share?owner=" + encodeURIComponent(state.doc.owner) +
+          "&path=" + encodeURIComponent(state.doc.path) +
+          "&username=" + encodeURIComponent(name),
+          { method: "DELETE" });
+        await openDoc(state.doc.owner, state.doc.path);
+        status(res.message || "Документ забран.");
+      } catch (err) {
+        fail(err);
+      }
+    });
+    li.append(who, " ", take);
+    list.append(li);
+  }
+}
 
 el("toggle-vis").addEventListener("click", async () => {
   const next = state.doc.visibility === "public" ? "private" : "public";

@@ -106,6 +106,10 @@
       <button type="submit">Создать документ</button>
     </form>
     <ul id="index-list" class="doclist"></ul>
+    <section id="shared-block" hidden aria-labelledby="shared-h">
+      <h2 id="shared-h">Со мной поделились</h2>
+      <ul id="shared-list" class="doclist"></ul>
+    </section>
   </section>
 
   <section id="doc" hidden aria-labelledby="doc-title">
@@ -117,7 +121,21 @@
       <button id="toggle-vis" type="button" hidden></button>
       <button id="rename-toggle" type="button" hidden>Переименовать</button>
       <button id="expiry-toggle" type="button" hidden>Срок хранения</button>
+      <button id="share-toggle" type="button" hidden>Отправить человеку</button>
     </p>
+    <div id="share-block" hidden>
+      <p id="share-summary" class="meta"></p>
+      <ul id="share-list" class="doclist"></ul>
+    </div>
+    <form id="share-form" hidden>
+      <label for="share-username">Кому отправить — юзернейм в облаке</label>
+      <input id="share-username" name="username" autocomplete="off" required>
+      <button type="submit">Отправить</button>
+      <button id="share-cancel" type="button">Отмена</button>
+      <p class="hint">Человек увидит документ у себя в разделе «Со мной поделились».
+        Публичным документ от этого не становится: читать и комментировать может только
+        тот, кому отправили, а править — только вы. Забрать обратно можно там же, под списком.</p>
+    </form>
     <form id="rename-form" hidden>
       <label for="rename-path">Новый адрес документа — путь в облаке</label>
       <input id="rename-path" name="path" autocomplete="off" required>

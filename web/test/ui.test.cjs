@@ -685,6 +685,138 @@ async function main() {
     ok("Alt+B вернул к последней нажатой кнопке комментария",
       w.document.activeElement === submitButton, w.document.activeElement.tagName);
   }
+
+  // --- 10. Отправка документа человеку по юзернейму --------------------------
+  {
+    // Кому документ отправлен, помнит сам «сервер»: страница после каждой
+    // отправки перечитывает документ, и список получателей должен приходить
+    // из ответа — иначе проверялось бы эхо собственных надписей.
+    let shared = [];
+    const doc = () => ({
+      owner: "deniz", path: "dz/lab1", slug: "dz/lab1", title: "Лаб1",
+      content: "текст", visibility: "private", can_edit: true,
+      updated_at: "2026-09-15T10:00:00Z", shared_with: shared,
+    });
+    const api = makeApi({
+      "GET /api/me": () => ({ status: 200, body: { user: { username: "deniz", is_admin: true } } }),
+      "GET /api/docs/deniz/dz/lab1": () => ({ status: 200, body: doc() }),
+      "GET /api/comments/deniz/dz/lab1": () => ({
+        status: 200,
+        body: { comments: [], comments_on: true, can_comment: true, require_auth: false, viewer_authenticated: true },
+      }),
+      "POST /api/share": () => {
+        shared = ["vasilisa"];
+        return { status: 200, body: { shared_with: shared, message: "Документ отправлен: vasilisa." } };
+      },
+      "DELETE /api/share?owner=deniz&path=dz/lab1&username=vasilisa": () => {
+        shared = [];
+        return { status: 200, body: { shared_with: shared, message: "Документ больше не у vasilisa." } };
+      },
+    });
+    const { $, w, tick } = await boot({ path: "/deniz/dz/lab1", api });
+
+    ok("хозяин видит кнопку отправки", $("share-toggle").hidden === false);
+    ok("пока никому не отправлено — списка получателей нет", $("share-block").hidden === true);
+    ok("форма отправки спрятана, пока её не позвали", $("share-form").hidden === true);
+
+    click(w, $("share-toggle"));
+    ok("кнопка раскрыла форму отправки", $("share-form").hidden === false);
+
+    // Поле пустое — отправлять нечего.
+    $("share-username").value = "  ";
+    submit(w, $("share-form"));
+    await tick();
+    ok("пустой юзернейм в API не ушёл",
+      !api.calls.some((c) => c.key === "POST /api/share"),
+      JSON.stringify(api.calls.map((c) => c.key)));
+
+    $("share-username").value = "vasilisa";
+    submit(w, $("share-form"));
+    await tick();
+    await tick();
+    const sent = api.calls.find((c) => c.key === "POST /api/share");
+    ok("отправка ушла в API", Boolean(sent), JSON.stringify(api.calls.map((c) => c.key)));
+    ok("в теле — адрес документа и юзернейм, без публикации",
+      sent && sent.init.body.includes("vasilisa") && sent.init.body.includes("dz/lab1") &&
+      !sent.init.body.includes("visibility"), sent && sent.init.body);
+    ok("после отправки сказано, кому ушёл документ",
+      /отправлен/i.test($("status").textContent), $("status").textContent);
+    ok("форма закрылась после отправки", $("share-form").hidden === true);
+    // Получателя видно, не раскрывая форму: иначе вторая отправка тому же
+    // человеку выглядит как потерянная.
+    ok("кому отправлено — видно сразу",
+      $("share-block").hidden === false && /vasilisa/.test($("share-list").textContent),
+      $("share-list").textContent);
+
+    click(w, $("share-list").querySelector("button"));
+    await tick();
+    await tick();
+    const taken = api.calls.find((c) => c.key.startsWith("DELETE /api/share"));
+    ok("«Забрать» отзывает доступ тем же адресом документа",
+      taken && taken.key.includes("username=vasilisa"), taken && taken.key);
+    ok("после отзыва документ больше ни у кого",
+      $("share-block").hidden === true, $("share-list").textContent);
+  }
+
+  // --- 11. Присланное лежит отдельным списком --------------------------------
+  {
+    const api = makeApi({
+      "GET /api/me": () => ({ status: 200, body: { user: { username: "deniz", is_admin: false } } }),
+      "GET /api/docs/deniz": () => ({ status: 200, body: { owner: "deniz", docs: [] } }),
+      "GET /api/shared": () => ({
+        status: 200,
+        body: {
+          docs: [{
+            owner: "vasilisa", path: "дз/лаб1", slug: "dz/lab1", title: "Лаб1",
+            visibility: "private", can_edit: false, url: "https://mdcloud.denizsincar.ru/vasilisa/dz/lab1",
+            updated_at: "2026-09-15T10:00:00Z",
+          }],
+        },
+      }),
+    });
+    const { $, w } = await boot({ path: "/deniz", api });
+
+    ok("присланное видно отдельным разделом",
+      $("shared-block").hidden === false && /Лаб1/.test($("shared-list").textContent),
+      $("shared-list").textContent);
+    ok("у присланного назван отправитель",
+      /vasilisa/.test($("shared-list").textContent), $("shared-list").textContent);
+    ok("ссылка ведёт к документу отправителя",
+      $("shared-list").querySelector("a").getAttribute("href") === "/vasilisa/dz/lab1",
+      $("shared-list").querySelector("a").getAttribute("href"));
+
+    // В «моих документах» присланного нет: там владение и правка.
+    ok("в своих документах присланного не появилось",
+      !/Лаб1/.test($("index-list").textContent), $("index-list").textContent);
+  }
+
+  // --- 12. Присланный документ открывается только на чтение -------------------
+  {
+    const api = makeApi({
+      "GET /api/me": () => ({ status: 200, body: { user: { username: "deniz", is_admin: false } } }),
+      "GET /api/docs/vasilisa/dz/lab1": () => ({
+        status: 200,
+        body: {
+          owner: "vasilisa", path: "dz/lab1", slug: "dz/lab1", title: "Лаб1",
+          content: "текст", visibility: "private", can_edit: false,
+          updated_at: "2026-09-15T10:00:00Z",
+        },
+      }),
+      "GET /api/comments/vasilisa/dz/lab1": () => ({
+        status: 200,
+        body: { comments: [], comments_on: true, can_comment: true, require_auth: false, viewer_authenticated: true },
+      }),
+    });
+    const { $, w } = await boot({ path: "/vasilisa/dz/lab1", api });
+
+    ok("чужой закрытый документ назван присланным, а не приватным",
+      /прислан вам/.test($("doc-meta").textContent), $("doc-meta").textContent);
+    // Правка, публикация, срок и отправка — хозяйские кнопки: у того, кому
+    // документ дали почитать, их быть не должно.
+    for (const id of ["edit", "toggle-vis", "rename-toggle", "expiry-toggle", "share-toggle"]) {
+      ok("у получателя нет кнопки «" + id + "»", $(id).hidden === true);
+    }
+  }
 }
 
 // Итог печатаем после main: внутри всё асинхронное, и выход по process.exit
