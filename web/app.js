@@ -5,9 +5,14 @@
 // httpOnly-куке на общем домене, поэтому редактору не нужно её получать —
 // он просто ходит в API, и браузер прикладывает куку сам.
 //
-// Разметка документа приходит из облака как обычный markdown, а не как
-// готовый HTML: рендерер здесь один, и он пропускает результат через
-// строгий список разрешённого. Скрипты из markdown не выполняются никогда.
+// Разметка документа приходит из облака как обычный markdown, и рендерится
+// она так же, как в редакторе mathmd: одна мдшка — один вид. За то, чтобы
+// написанное в документе не выполнилось, отвечает не чистка HTML, а CSP
+// страницы (см. deploy/Caddyfile.snippet): inline-скриптов и обработчиков на
+// странице нет, поэтому вставший из документа тег исполнить нечего.
+
+// Правки самой мдшки (frontmatter, кавычки AsciiMath) живут в md.mjs рядом —
+// модуль подгружаем по требованию, см. mdTools() ниже.
 
 const API = "";
 
@@ -75,11 +80,8 @@ async function api(path, opts = {}) {
 // открываться и логинить, просто без отрендеренного текста.
 async function renderers() {
   if (!state.renderers) {
-    const [showdownMod, purifyMod] = await Promise.all([
-      import("https://cdn.jsdelivr.net/npm/showdown@2.1.0/+esm"),
-      import("https://cdn.jsdelivr.net/npm/dompurify@3/+esm"),
-    ]);
-    const showdown = new (showdownMod.default || showdownMod) .Converter({
+    const showdownMod = await import("https://cdn.jsdelivr.net/npm/showdown@2.1.0/+esm");
+    const showdown = new (showdownMod.default || showdownMod).Converter({
       tables: true,
       tasklists: true,
       simplifiedAutoLink: true,
@@ -87,7 +89,7 @@ async function renderers() {
       headerLevelStart: 2,
       extensions: [chessExtension],
     });
-    state.renderers = { showdown, DOMPurify: purifyMod.default || purifyMod };
+    state.renderers = { showdown };
     // Шахматный компонент — тот же, что в mathmd.
     import("https://cdn.jsdelivr.net/gh/denizsincar29/chessjax@v0.8.0/chessjax.js").catch(() => {});
   }
@@ -109,27 +111,74 @@ const chessExtension = {
   },
 };
 
-// Список разрешённого. Всё, чего здесь нет, до страницы не доедет:
-// ни <script>, ни <iframe>, ни обработчиков вида onclick.
-const SANITIZE = {
-  FORBID_TAGS: [
-    "script", "style", "iframe", "object", "embed", "form", "input",
-    "button", "textarea", "select", "link", "meta", "base", "audio", "video", "source",
-  ],
-  FORBID_ATTR: ["style", "srcset", "formaction", "ping"],
-  ADD_TAGS: ["chessjax-board"],
-  CUSTOM_ELEMENT_HANDLING: {
-    tagNameCheck: /^chessjax-board$/,
-    attributeNameCheck: () => true, // атрибуты доски: fen, pgn, id, lang, move, chess…
-    allowCustomizedBuiltInElements: false,
-  },
-  ALLOW_DATA_ATTR: false,
-};
+// md.mjs — модуль, и грузим мы его сами: страница живёт одним скриптом, а
+// тест прогоняет её в jsdom как обычный скрипт, где import не работает (см.
+// web/test/ui.test.cjs). Один лишний запрос, дальше модуль в кеше браузера.
+let mdModule = null;
+function mdTools() {
+  if (!mdModule) mdModule = import("./md.mjs");
+  return mdModule;
+}
 
 async function renderMarkdown(markdown) {
-  const { showdown, DOMPurify } = await renderers();
-  const html = showdown.makeHtml(markdown || "");
-  return DOMPurify.sanitize(html, SANITIZE);
+  const [{ showdown }, { markdownToHtml }] = await Promise.all([renderers(), mdTools()]);
+  // Готовый HTML больше ничем не чистим: страницу защищает CSP, а не список
+  // разрешённых тегов (см. deploy/Caddyfile.snippet).
+  return markdownToHtml(markdown, showdown);
+}
+
+// ------------------------------------------------------------------ формулы
+
+// MathJax — тот же и настроен так же, как в редакторе mathmd: скрытый MathML
+// вместо встроенной англоязычной речи (NVDA читает его на своём языке), меню
+// выключено, авторасстановка при загрузке тоже — формулы расставляем сами,
+// после того как документ отрисован.
+const MATHJAX_SRC = "https://cdn.jsdelivr.net/npm/mathjax@4/tex-chtml.js";
+
+let mathjaxLoading = null;
+
+// Скрипт грузим лениво и один раз. Конфиг обязан стоять в window.MathJax до
+// загрузки скрипта, поэтому он здесь, а не в разметке: инлайновый <script> на
+// странице запрещён её же CSP.
+function loadMathJax() {
+  if (!mathjaxLoading) {
+    window.MathJax = {
+      loader: { load: ["input/tex", "input/asciimath", "output/chtml"] },
+      tex: {
+        inlineMath: [["$", "$"], ["\\(", "\\)"]],
+        displayMath: [["$$", "$$"], ["\\[", "\\]"]],
+        packages: { "[+]": ["ams"] },
+      },
+      asciimath: { delimiters: [["`", "`"]] },
+      options: {
+        menuOptions: { settings: { enrich: true, assistiveMml: true, speech: false, braille: false } },
+        a11y: { speech: false, assistiveMml: true },
+        enableMenu: false,
+        renderActions: {},
+      },
+    };
+    mathjaxLoading = new Promise((resolve, reject) => {
+      const script = document.createElement("script");
+      script.src = MATHJAX_SRC;
+      script.async = true;
+      script.onload = () => resolve(window.MathJax);
+      script.onerror = () => reject(new Error("MathJax не загрузился"));
+      document.head.append(script);
+    });
+  }
+  return mathjaxLoading;
+}
+
+// typesetMath не роняет показ документа: текст без формул полезнее пустого
+// экрана, поэтому о неудаче говорим в статусе и живём дальше.
+async function typesetMath(root) {
+  try {
+    const mj = await loadMathJax();
+    await (mj.startup && mj.startup.promise);
+    await mj.typesetPromise([root]);
+  } catch (err) {
+    status("Формулы не отрисовались: " + err.message);
+  }
 }
 
 // ------------------------------------------------------------------ шапка
@@ -252,6 +301,7 @@ async function openDoc(owner, path) {
   const body = el("doc-body");
   try {
     body.innerHTML = await renderMarkdown(doc.content);
+    await typesetMath(body);
   } catch (err) {
     body.replaceChildren();
     const pre = document.createElement("pre");

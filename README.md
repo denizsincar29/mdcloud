@@ -32,9 +32,11 @@ never send to a server.
 - **Comments** can be anonymous (with a name you type) or from a logged-in user.
 - **Registration is by invitation.** The first account is the cloud owner: they
   pass without a code and hand out one-time codes to everyone else.
-- **Markdown is never executed as HTML.** The API returns markdown text; the
-  preview renders it through showdown + DOMPurify with an allowlist, and the
-  page runs under a CSP that has no `unsafe-inline` and no `unsafe-eval`.
+- **One markdown — one look.** The preview renders a document exactly like the
+  mathmd editor does: showdown, MathJax 4 (LaTeX and AsciiMath, with hidden
+  MathML for screen readers), chess boards, frontmatter stripped. The page runs
+  under a CSP that keeps scripts to itself and jsdelivr and has no
+  `unsafe-inline` for scripts, so nothing written in a document can execute.
 
 ## Install
 
@@ -167,15 +169,21 @@ to be somebody who can hand out codes.
   only allowlisted origins — so form-based CSRF never reaches a handler.
 - Commenter IPs are stored only as `sha256(salt + ip)` and are used solely for
   rate limiting.
-- Markdown from the database is sanitised on the client with an allowlist.
-  `<script>`, `<iframe>`, event handlers and `javascript:` URLs never reach the
-  DOM; chess boards survive because `chessjax-board` is the one custom element
-  allowed through.
-- The API is served under a CSP with no `unsafe-inline`, so even a sanitizer
-  bypass has nothing to execute.
-- Third-party scripts are pinned to jsdelivr in the CSP. Self-hosting showdown
-  and DOMPurify under `web/vendor/` and dropping the CDN from the policy is a
-  two-line change if you would rather not depend on it.
+- A document renders as the editor renders it — no sanitizer sits between
+  showdown and the page. What keeps that safe is the CSP on the page, not an
+  allowlist of tags: `script-src` allows only the origin and jsdelivr and has
+  neither `unsafe-inline` nor `unsafe-eval`, so an inline `<script>`, an
+  `onclick=` attribute or a `javascript:` link in a document does not run;
+  `form-action 'self'` stops a form from posting credentials elsewhere; frames
+  fall back to `default-src 'self'`. Strip the CSP (a static host that does not
+  let you set headers, say) and the page is no longer safe — put DOMPurify back
+  before that.
+- `style-src` does carry `'unsafe-inline'`: MathJax and chessjax build their
+  stylesheets inside the page. Injected CSS is an annoyance, not an execution
+  path.
+- Third-party scripts are pinned to jsdelivr in the CSP. Self-hosting showdown,
+  MathJax and chessjax under `web/vendor/` and dropping the CDN from the policy
+  is a small change if you would rather not depend on it.
 
 ## Layout
 
@@ -188,6 +196,8 @@ internal/auth           bcrypt, tokens, invite codes
 internal/mdpath         document path rules
 internal/api            routes and handlers
 web/                    preview, login, registration, invites (static, served by Caddy)
+web/md.mjs              markdown → HTML for the preview (frontmatter, AsciiMath)
+web/test/               page smoke test (jsdom) and markdown test (node)
 deploy.sh               build + database + systemd + Caddy, idempotent
 deploy/Caddyfile.snippet
 ```
@@ -203,22 +213,26 @@ nor the network. They cover document visibility, ownership, comment rules,
 first-user/admin rules, invite redemption and expiry, cookie flags, CSRF and
 CORS, token lifecycle and path validation.
 
-The web page has its own smoke test (jsdom, no browser):
+The web page has its own smoke tests (no browser):
 
 ```bash
-npm install -g jsdom
-node web/test/ui.test.cjs
+npm install -g jsdom showdown
+node web/test/ui.test.cjs   # screens, buttons, API calls (jsdom + stubbed fetch)
+node web/test/md.test.mjs   # markdown → HTML: frontmatter, AsciiMath, formulas
 ```
 
-It drives registration, the invite link, issuing and revoking invites, the
-create-document button and the error states against a stubbed API.
+`ui.test.cjs` drives registration, the invite link, issuing and revoking
+invites, the create-document button and the error states against a stubbed API.
+`md.test.mjs` checks what happens to a document on the way to the page —
+frontmatter goes, backticks survive as AsciiMath delimiters instead of turning
+into `<code>`, LaTeX reaches the page untouched — first against a stub, then
+against the real showdown if it is installed.
 
 ## Not done yet
 
-- The preview renders markdown in the browser; it does not yet reproduce the
-  mathmd viewer (MathJax formulas, Desmos graphs, frontmatter-driven module
-  loading). The editor opens the document today — the preview will start
-  reusing the editor's render pipeline when mathmd grows a read-only viewer mode.
+- Desmos blocks (` ```desmos `) are not rendered in the preview: the graph
+  needs its SDK and its API key, and a read-only page does not need a live
+  calculator yet. Formulas, AsciiMath and chess boards do render.
 - No password reset by email, no admin UI for users (only for invites).
 - Comments are not paginated.
 - One process, one rate limiter in memory; a second node would need a shared

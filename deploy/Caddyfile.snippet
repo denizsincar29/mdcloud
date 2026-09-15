@@ -13,10 +13,15 @@ mdcloud.example {
 		X-Content-Type-Options nosniff
 		Referrer-Policy no-referrer
 		Strict-Transport-Security "max-age=31536000"
-		# Скрипты только свои и с cdn.jsdelivr.net (showdown, DOMPurify,
-		# chessjax). Ни 'unsafe-inline', ни 'unsafe-eval' — разметка из
-		# документа не может ничего выполнить.
-		Content-Security-Policy "default-src 'self'; script-src 'self' https://cdn.jsdelivr.net; style-src 'self'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+		# Запрет на выполнение держит эта строка, а не чистка HTML: скрипты
+		# только свои и с cdn.jsdelivr.net (showdown, chessjax, MathJax), ни
+		# 'unsafe-inline', ни 'unsafe-eval' — поэтому тег из документа не
+		# исполнится, а форма не отправится на чужой адрес (form-action).
+		#
+		# style-src с 'unsafe-inline' — плата за MathJax и chessjax: оба
+		# собирают свою таблицу стилей прямо в документе. Вставший <style>
+		# так можно, но скриптом это не становится.
+		Content-Security-Policy "default-src 'self'; script-src 'self' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; img-src 'self' data: https:; font-src 'self' data: https://cdn.jsdelivr.net; connect-src 'self'; form-action 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
 	}
 
 	# API — на сервис, всё остальное — статика предпросмотра.
