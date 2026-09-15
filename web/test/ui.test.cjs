@@ -438,16 +438,8 @@ async function main() {
     ok("и подсказки про подпись тоже нет", $("comment-hint").textContent === "", $("comment-hint").textContent);
   }
 
-  // --- 8д. Блок desmos: контейнер, SDK, кнопка входа --------------------------
+  // --- 8д. Блок desmos: контейнер и рамка с графиком -------------------------
   {
-    const expr = [];
-    let focused = false;
-    const Desmos = {
-      Calculator: () => ({
-        setExpression: (e) => expr.push(e.latex),
-        focusFirstExpression: () => { focused = true; },
-      }),
-    };
     const plot = "y = x^2 - 2\ny = \\sin(x)";
     const blocks = [
       { line: 1, html: "<p>График ниже.</p>" },
@@ -468,11 +460,10 @@ async function main() {
         body: { comments: [], comments_on: true, can_comment: true, require_auth: false, viewer_authenticated: true },
       }),
     });
-    const { $, w, tick } = await boot({
+    const { $, w } = await boot({
       path: "/deniz/график",
       api,
       hooks: {
-        Desmos,
         MathJax: { startup: { promise: Promise.resolve() }, typesetPromise: async () => {} },
         mdcloudRenderers: { showdown: { makeHtml: (md) => "<p>" + md + "</p>" } },
         mdcloudMd: { markdownBlocks: () => blocks },
@@ -485,19 +476,19 @@ async function main() {
     ok("выражения едут в атрибуте, а не разметкой",
       !/<p>|y = x\^2/.test(html), html);
 
-    await tick(); // график строится в фоне: initDesmos — тоже асинхронный
-    await tick();
-    ok("SDK получил обе строки графика", expr.join(" | ") === "y = x^2 - 2 | y = \\sin(x)", JSON.stringify(expr));
-
-    const enter = $("doc-body").querySelector(".desmos-enter");
-    ok("перед графиком встала кнопка входа", Boolean(enter), $("doc-body").innerHTML);
-    ok("кнопка подписана для чтеца экрана",
-      enter && /к списку выражений/.test(enter.textContent), enter && enter.textContent);
-    ok("кнопка стоит перед контейнером, а не внутри",
-      enter && enter.nextElementSibling && enter.nextElementSibling.classList.contains("desmos"));
-
-    click(w, enter);
-    ok("кнопка входа зовёт список выражений", focused);
+    const frame = $("doc-body").querySelector(".desmos iframe");
+    ok("в контейнер встала рамка с графиком", Boolean(frame), $("doc-body").innerHTML);
+    ok("рамка ведёт в отдельный документ графика",
+      frame && frame.getAttribute("src").startsWith("/embed/desmos#"), frame && frame.getAttribute("src"));
+    ok("выражения уехали во фрагменте адреса",
+      frame && frame.getAttribute("src") === "/embed/desmos#" + encodeURIComponent(plot),
+      frame && frame.getAttribute("src"));
+    ok("рамка названа для чтеца экрана",
+      frame && frame.title === "График Desmos", frame && frame.title);
+    // Никакого SDK на странице документа: он живёт внутри рамки, в своём
+    // документе и со своей политикой.
+    ok("SDK Desmos на странице документа не грузится",
+      !w.document.querySelector('script[src*="desmos"]'), $("doc-body").innerHTML);
   }
 
   // --- 9. Комментарий ссылается на строку документа --------------------------

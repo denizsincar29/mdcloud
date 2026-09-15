@@ -47,9 +47,10 @@ never send to a server.
 - **One markdown — one look.** The preview renders a document exactly like the
   mathmd editor does: showdown, MathJax 4 (LaTeX and AsciiMath, with hidden
   MathML for screen readers), chess boards, Desmos graphs, frontmatter
-  stripped. The page runs under a CSP that keeps scripts to itself, jsdelivr
-  and desmos.com, and has no `unsafe-inline` for scripts, so nothing written in
-  a document can execute.
+  stripped. The page runs under a CSP that keeps scripts to itself and
+  jsdelivr and has no `unsafe-inline` for scripts, so nothing written in a
+  document can execute. A graph is the exception and gets its own document: see
+  *Graphs live in their own document* below.
 
 ## Install
 
@@ -205,20 +206,35 @@ to be somebody who can hand out codes.
   neither `unsafe-inline` nor `unsafe-eval`, so an inline `<script>`, an
   `onclick=` attribute or a `javascript:` link in a document does not run;
   `form-action 'self'` stops a form from posting credentials elsewhere; frames
-  are limited to desmos.com, where the graph calculator lives, and otherwise
-  fall back to `default-src 'self'`. Strip the CSP (a static host that does not
-  let you set headers, say) and the page is no longer safe — put DOMPurify back
-  before that.
+  are limited to the site itself — the only frame is the graph embed. Strip the
+  CSP (a static host that does not let you set headers, say) and the page is no
+  longer safe — put DOMPurify back before that.
 - `style-src` does carry `'unsafe-inline'`: MathJax and chessjax build their
   stylesheets inside the page. Injected CSS is an annoyance, not an execution
   path.
-- Third-party scripts are pinned to jsdelivr and desmos.com in the CSP.
-  Self-hosting showdown, MathJax and chessjax under `web/vendor/` and dropping
-  the CDN from the policy is a small change if you would rather not depend on
-  it; the Desmos SDK has to come from desmos.com either way.
-- The Desmos SDK is loaded only when a document actually carries a
-  ` ```desmos ` block; the API key in `app.js` is the public demo key, the same
-  one the editor uses.
+- Third-party scripts are pinned to jsdelivr in the CSP. Self-hosting showdown,
+  MathJax and chessjax under `web/vendor/` and dropping the CDN from the policy
+  is a small change if you would rather not depend on it.
+
+### Graphs live in their own document
+
+A Desmos graph is not drawn on the document page: the page puts an
+`<iframe src="/embed/desmos#…">` where the ` ```desmos ` block was, and the
+graph itself is built by `web/embed-desmos.*` — a document with nothing in it
+but the calculator. Caddy gives that one path its own policy, in
+`deploy/Caddyfile.snippet`.
+
+The reason is `'unsafe-eval'`: the Desmos SDK evaluates strings as code and
+will not start without it (`Desmos.Calculator is not a function` — the failing
+probe is in the commit message). Allowing that on the document page would
+remove exactly the property the page relies on, since a document is somebody
+else's markdown and no sanitizer stands between showdown and the page. In the
+embed document there is nothing to protect: the expressions arrive in the URL
+fragment, go to the calculator as LaTeX strings, and are never assembled into
+markup. The parent page keeps `frame-src 'self'` and no `unsafe-eval`.
+
+The API key in `embed-desmos.html` is the public demo key, the same the editor
+uses. Nothing is loaded for documents without a ` ```desmos ` block.
 
 ## Layout
 
@@ -233,6 +249,7 @@ internal/api            routes and handlers
 internal/api/llm.md     API guide for assistants, served at /api/llm.md
 web/                    preview, login, registration, invites, API keys (static, served by Caddy)
 web/md.mjs              markdown → HTML for the preview (frontmatter, AsciiMath)
+web/embed-desmos.*      one Desmos graph per document, framed by the preview
 web/test/               page smoke test (jsdom) and markdown test (node)
 deploy.sh               build + database + systemd + Caddy, idempotent
 deploy/Caddyfile.snippet
@@ -258,7 +275,8 @@ node web/test/md.test.mjs   # markdown → HTML: frontmatter, AsciiMath, formula
 ```
 
 `ui.test.cjs` drives registration, the invite link, issuing and revoking
-invites, the create-document button and the error states against a stubbed API.
+invites, the create-document button, the folder tree, renaming, the desmos
+frame and the error states against a stubbed API.
 `md.test.mjs` checks what happens to a document on the way to the page —
 frontmatter goes, backticks survive as AsciiMath delimiters instead of turning
 into `<code>`, LaTeX reaches the page untouched — first against a stub, then
@@ -267,7 +285,11 @@ against the real showdown if it is installed.
 ## Not done yet
 
 - A Desmos graph is a live calculator, so a document with a graph is neither
-  printable nor available offline; documents without graphs load no SDK at all.
+  printable nor available offline. Documents without graphs load nothing
+  extra.
+- The graph embed always starts a calculator, even when the reader only
+  wanted the text; a static picture of the graph would be lighter, but then
+  the graph would stop being readable by a screen reader.
 - No password reset by email, no admin UI for users (only for invites).
 - Comments are not paginated.
 - One process, one rate limiter in memory; a second node would need a shared

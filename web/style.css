@@ -220,11 +220,10 @@ a:focus-visible {
   max-width: 100%;
 }
 
-/* График Desmos: SDK строит внутри контейнера свой iframe, поэтому высоту
-   задаём контейнеру — иначе iframe схлопнется в ноль и графика не будет
-   видно. Ширина — по колонке текста. */
+/* График Desmos — рамка с отдельным документом (см. app.js). Высоту задаём
+   контейнеру: внутри рамки калькулятор занимает всё, что ему дали, а без
+   высоты он схлопнулся бы в ноль. Ширина — по колонке текста. */
 .markdown .desmos {
-  position: relative;
   width: 100%;
   height: 22rem;
   margin: 0.6rem 0;
@@ -235,11 +234,8 @@ a:focus-visible {
 }
 
 .markdown .desmos iframe {
+  display: block;
   width: 100%;
   height: 100%;
   border: 0;
-}
-
-.markdown .desmos-fallback {
-  color: var(--muted);
 }

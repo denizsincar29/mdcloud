@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>График Desmos</title>
+<!--
+  Одна страница — один график. Живёт отдельным документом нарочно: SDK Desmos
+  требует 'unsafe-eval', а страница облака рисует чужой markdown и такой
+  политики не переживёт. Здесь же нет ничего, кроме графика: выражения
+  приходят во фрагменте адреса (#…), и каждая строка уходит в калькулятор
+  строкой LaTeX, а не разметкой.
+
+  Политику этому документу задаёт Caddy (handle /embed/desmos*) — узкую:
+  только desmos.com и свои два файла.
+-->
+<style>
+  html, body { margin: 0; height: 100%; }
+  body { font: 16px/1.4 system-ui, sans-serif; }
+  #graph { width: 100%; height: 100%; }
+  /* Кнопка входа в график: калькулятор — чужой iframe, Tab внутрь него не
+     доводит. Кнопка невидимая, но стоит в потоке фокуса: чтец экрана читает
+     её как «График Desmos — перейти к списку выражений, кнопка», а Enter
+     переводит фокус внутрь, сразу в список выражений. */
+  #enter { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+</style>
+<script defer src="https://www.desmos.com/api/v1.10/calculator.js?apiKey=dcb31709b452b1cf9dc26972add0fda6"></script>
+<script defer src="/embed-desmos.js"></script>
+</head>
+<body>
+<button type="button" id="enter" hidden>График Desmos — перейти к списку выражений, кнопка</button>
+<div id="graph"></div>
+<noscript>График рисуется скриптом — включите JavaScript.</noscript>
+</body>
+</html>
