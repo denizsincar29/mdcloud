@@ -155,7 +155,9 @@ hands nobody a way in. A code is spent in the same transaction that creates the
 account, so two people cannot use one code and a failed signup does not burn it.
 
 `POST /api/invites` returns `https://<cloud>/#invite=<code>`; the code lives in
-the URL fragment and never reaches the server or its logs.
+the URL fragment and never reaches the server or its logs. The invited person
+gets the link and nothing else — the registration form has no code field, the
+code rides in the fragment and is sent along with the signup.
 
 If an existing cloud ends up with no admin at all (accounts created before
 invites existed), the oldest account is promoted to owner at startup — there has

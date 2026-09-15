@@ -108,7 +108,6 @@ async function main() {
 
     $("register-name").value = "deniz";
     $("register-pass").value = "parol1234";
-    $("register-invite-row").hidden = true; // приглашение не нужно
     submit(w, $("register-form"));
     await tick();
     const call = stub.calls.find((c) => c.key === "POST /api/auth/register");
@@ -130,8 +129,9 @@ async function main() {
     const api = makeApi();
     const { $, w, tick, stub } = await boot({ hash: "#invite=KOD42", api });
     ok("по ссылке открылась регистрация", !$("register").hidden);
-    ok("код из ссылки подставлен", $("register-invite").value === "KOD42", $("register-invite").value);
-    ok("поле кода видно", $("register-invite-row").hidden === false);
+    // Кода в форме нет: приглашение приезжает ссылкой и едет в теле запроса
+    // само — вставлять руками нечего.
+    ok("поля для кода в форме нет", !w.document.getElementById("register-invite"));
     $("register-name").value = "vasilisa";
     $("register-pass").value = "parol1234";
     submit(w, $("register-form"));
@@ -200,7 +200,8 @@ async function main() {
     click(w, $("register-toggle"));
     await tick();
     ok("кнопка регистрации открыла форму", !$("register").hidden);
-    ok("при режиме «по приглашению» поле кода видно", $("register-invite-row").hidden === false);
+    ok("при режиме «по приглашению» сказано открыть ссылку",
+      /ссылк/i.test($("register-hint").textContent), $("register-hint").textContent);
     $("register-name").value = "petya";
     $("register-pass").value = "parol1234";
     submit(w, $("register-form"));

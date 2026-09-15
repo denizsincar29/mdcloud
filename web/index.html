@@ -47,10 +47,6 @@
       <input id="register-mail" name="email" type="email" autocomplete="email">
       <label for="register-pass">Пароль</label>
       <input id="register-pass" name="password" type="password" autocomplete="new-password" required>
-      <p id="register-invite-row" hidden>
-        <label for="register-invite">Код приглашения</label>
-        <input id="register-invite" name="invite" autocomplete="off">
-      </p>
       <button type="submit">Создать аккаунт</button>
       <button id="register-back" type="button">Назад ко входу</button>
     </form>
@@ -58,8 +54,9 @@
 
   <section id="invites" hidden aria-labelledby="invites-h">
     <h1 id="invites-h">Приглашения</h1>
-    <p class="meta">Приглашение пускает одного человека. Код показывается один раз — в облаке
-      хранится только его отпечаток, и посмотреть ссылку потом не получится.</p>
+    <p class="meta">Приглашение пускает одного человека. Ссылка показывается один раз — в облаке
+      хранится только её отпечаток, и посмотреть приглашение потом не получится. Отправьте
+      ссылку тому, кого приглашаете: он откроет её и зарегистрируется.</p>
     <form id="invite-form">
       <label for="invite-note">Кому — для памяти</label>
       <input id="invite-note" name="note" maxlength="120" placeholder="Маше">

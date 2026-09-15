@@ -22,6 +22,7 @@ const state = {
   renderers: null,
   config: null, // что сервер рассказал про регистрацию
   invites: [],
+  invite: "", // код из ссылки-приглашения, с которой пришёл человек
 };
 
 const el = (id) => document.getElementById(id);
@@ -413,13 +414,11 @@ function registration() {
 
 function paintRegister() {
   const mode = registration();
-  const byInvite = mode === "invite" || mode === "first";
-  el("register-invite-row").hidden = !byInvite;
   el("register-toggle").hidden = mode === "closed";
   el("register-hint").textContent = {
     first: "Вы первый — регистрируйтесь, и облако станет вашим: приглашения выдаёте вы.",
     open: "Регистрация открыта для всех.",
-    invite: "Регистрация по приглашению: вставьте код из ссылки, которую вам прислали.",
+    invite: "Регистрация по приглашению: откройте ссылку, которую вам прислали, — форма откроется сама.",
     closed: "Регистрация закрыта. Попросите приглашение у хозяина облака.",
   }[mode];
 }
@@ -436,14 +435,15 @@ async function openLogin(message) {
   el("login-name").focus();
 }
 
-// openRegister показывает форму регистрации. Код можно принести ссылкой
+// openRegister показывает форму регистрации. Приглашение приходит ссылкой
 // вида mdcloud.denizsincar.ru/#invite=КОД — фрагмент адреса на сервер не
-// уходит, поэтому в логах он не осядет.
+// уходит, поэтому в логах он не осядет. Отдельного поля для кода нет: человеку
+// нечего вставлять руками, он просто открывает ссылку.
 async function openRegister(invite) {
   show("register");
   status("");
   paintRegister();
-  el("register-invite").value = invite || "";
+  state.invite = invite || "";
   if (!state.config) {
     try {
       state.config = await api("/api/config");
@@ -727,7 +727,7 @@ el("register-form").addEventListener("submit", async (event) => {
         username: el("register-name").value,
         email: el("register-mail").value,
         password: el("register-pass").value,
-        invite: el("register-invite").value.trim(),
+        invite: state.invite || "",
       },
     });
     state.user = out.user;

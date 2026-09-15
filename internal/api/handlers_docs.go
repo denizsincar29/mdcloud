@@ -191,7 +191,7 @@ func (s *Server) postDoc(w http.ResponseWriter, r *http.Request, u *models.User)
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	s.saveDoc(w, u, u, path, &in)
+	s.saveDoc(w, u, u, path, &in, http.StatusCreated)
 }
 
 func (s *Server) putDoc(w http.ResponseWriter, r *http.Request, u *models.User) {
@@ -209,12 +209,17 @@ func (s *Server) putDoc(w http.ResponseWriter, r *http.Request, u *models.User) 
 	if !decodeJSON(w, r, &in, int64(s.cfg.MaxDocBytes)+8192) {
 		return
 	}
-	s.saveDoc(w, u, owner, path, &in)
+	s.saveDoc(w, u, owner, path, &in, http.StatusOK)
 }
 
 // saveDoc — общий путь записи: проверки, создание или обновление, ответ. Им
 // пользуются и PUT по адресу, и POST с путём в теле.
-func (s *Server) saveDoc(w http.ResponseWriter, u, owner *models.User, path string, in *docInput) {
+//
+// createdCode — что ответить, когда документа ещё не было. PUT всегда отвечает
+// 200: он «положи сюда», адрес уже назван, и менять его ответ незачем — на нём
+// висит редактор. POST отвечает 201: по коду видно, завёл клиент документ или
+// переписал существующий.
+func (s *Server) saveDoc(w http.ResponseWriter, u, owner *models.User, path string, in *docInput, createdCode int) {
 	if owner.ID != u.ID {
 		writeErr(w, http.StatusForbidden, "править можно только свои документы")
 		return
@@ -277,7 +282,7 @@ func (s *Server) saveDoc(w http.ResponseWriter, u, owner *models.User, path stri
 	}
 	code := http.StatusOK
 	if created {
-		code = http.StatusCreated
+		code = createdCode
 	}
 	writeJSON(w, code, s.viewDoc(&doc, owner.Username, u, true))
 }
