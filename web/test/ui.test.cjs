@@ -790,7 +790,71 @@ async function main() {
       !/Лаб1/.test($("index-list").textContent), $("index-list").textContent);
   }
 
-  // --- 12. Присланный документ открывается только на чтение -------------------
+  // --- 12. Поле юзернейма подсказывает, кто есть в облаке ---------------------
+  {
+    const api = makeApi({
+      "GET /api/me": () => ({ status: 200, body: { user: { username: "deniz", is_admin: true } } }),
+      "GET /api/docs/deniz/dz/lab1": () => ({
+        status: 200,
+        body: {
+          owner: "deniz", path: "dz/lab1", slug: "dz/lab1", title: "Лаб1",
+          content: "текст", visibility: "private", can_edit: true,
+          updated_at: "2026-09-15T10:00:00Z",
+        },
+      }),
+      "GET /api/comments/deniz/dz/lab1": () => ({
+        status: 200,
+        body: { comments: [], comments_on: true, can_comment: true, require_auth: false, viewer_authenticated: true },
+      }),
+      // Подсказку отдаём по началу набранного: «v» — оба, «vasi» — один.
+      "GET /api/users?q=v": () => ({ status: 200, body: { users: ["vasilisa", "vasya"] } }),
+      "GET /api/users?q=vasi": () => ({ status: 200, body: { users: ["vasilisa"] } }),
+      "GET /api/users?q=nikogo": () => ({ status: 200, body: { users: [] } }),
+      "GET /api/users?q=n": () => ({ status: 500, body: { error: "база недоступна" } }),
+    });
+    const { $, w, tick } = await boot({ path: "/deniz/dz/lab1", api });
+
+    click(w, $("share-toggle"));
+    ok("поле юзернейма — текстовое, с подсказкой",
+      $("share-username").getAttribute("list") === "people" &&
+      $("share-username").tagName === "INPUT",
+      $("share-username").tagName);
+
+    // Подсказка спрашивается с задержкой (пока человек набирает, ответы
+    // устаревают), поэтому ждём её дольше обычного тика.
+    const type = async (value) => {
+      $("share-username").value = value;
+      $("share-username").dispatchEvent(new w.Event("input", { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 400));
+    };
+
+    await type("v");
+    const options = [...$("people").querySelectorAll("option")].map((o) => o.value);
+    ok("по началу юзернейма пришли подсказки",
+      options.join(",") === "vasilisa,vasya", options.join(","));
+    ok("подсказка спрашивает облако, а не перебирает зашитых",
+      api.calls.some((c) => c.key === "GET /api/users?q=v"),
+      JSON.stringify(api.calls.map((c) => c.key)));
+
+    await type("vasi");
+    ok("на уточнённый запрос подсказок меньше",
+      [...$("people").querySelectorAll("option")].map((o) => o.value).join(",") === "vasilisa",
+      $("people").textContent);
+
+    await type("nikogo");
+    ok("никого не нашлось — подсказка пуста, поле работает",
+      $("people").querySelectorAll("option").length === 0);
+    ok("пустая подсказка не мешает отправить",
+      $("share-username").value === "nikogo");
+
+    // Облако при подсказке прилегло — человек всё равно должен мочь отправить:
+    // это подсказка, а не обязательный шаг.
+    await type("n");
+    ok("сбой подсказки не пишет ошибку в статус",
+      !/недоступн/i.test($("status").textContent), $("status").textContent);
+  }
+
+  // --- 13. Присланный документ открывается только на чтение -------------------
   {
     const api = makeApi({
       "GET /api/me": () => ({ status: 200, body: { user: { username: "deniz", is_admin: false } } }),

@@ -1216,6 +1216,43 @@ el("share-toggle").addEventListener("click", () => {
   status("Кому отправить документ. Напишите юзернейм и нажмите Enter.");
 });
 
+// Подсказка к полю «кому отправить»: облако знает, кто в нём заведён, и
+// подставляет совпавшие юзернеймы. Поле остаётся текстовым — набрать по памяти
+// можно всегда, — а подсказка лишь помогает не ошибиться; список ведёт браузер
+// (datalist), потому что это единственный вариант, который чтец экрана читает
+// как «поле с подсказкой», не заставляя человека изучать новую навигацию.
+// Спрашиваем не на каждую букву, а с задержкой: пока человек набирает, ответы
+// всё равно устаревают.
+let shareLookupTimer = 0;
+let shareLookupSeq = 0;
+el("share-username").addEventListener("input", () => {
+  const q = el("share-username").value.trim();
+  const list = el("people");
+  const seq = ++shareLookupSeq;
+  clearTimeout(shareLookupTimer);
+  if (!q) {
+    list.replaceChildren();
+    return;
+  }
+  shareLookupTimer = setTimeout(async () => {
+    let data;
+    try {
+      data = await api("/api/users?q=" + encodeURIComponent(q));
+    } catch (err) {
+      return; // подсказка не сработала — не повод ругаться: отправить можно и так
+    }
+    // Пока ходили в облако, человек набрал дальше: его подсказка уже в пути,
+    // а эта опоздала.
+    if (seq !== shareLookupSeq) return;
+    list.replaceChildren();
+    for (const name of data.users || []) {
+      const option = document.createElement("option");
+      option.value = name;
+      list.append(option);
+    }
+  }, 250);
+});
+
 el("share-cancel").addEventListener("click", () => {
   el("share-form").hidden = true;
   el("share-toggle").focus();

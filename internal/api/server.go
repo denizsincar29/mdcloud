@@ -45,6 +45,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/auth/login", s.login)
 	mux.HandleFunc("POST /api/auth/logout", s.requireUser(s.logout))
 	mux.HandleFunc("GET /api/me", s.requireUser(s.me))
+	mux.HandleFunc("GET /api/users", s.requireUser(s.listUsers))
 
 	mux.HandleFunc("GET /api/docs", s.requireUser(s.listMine))
 	mux.HandleFunc("POST /api/docs", s.requireUser(s.postDoc))

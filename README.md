@@ -166,6 +166,7 @@ An assistant-readable walkthrough of the whole surface lives at
 | `PUT` | `/api/docs/{owner}/{path...}` | owner | create/update `{title?, content?, visibility?, comments_on?, comments_require_auth?, expires_in_days?}` |
 | `PATCH` | `/api/docs/{owner}/{path...}` | owner | `{path}` — перенести на другой адрес (`409`, если адрес занят) |
 | `DELETE` | `/api/docs/{owner}/{path...}` | owner | soft delete |
+| `GET` | `/api/users?q=` | signed in | usernames starting with `q` (max 10, self excluded) — the suggestion list for the send field |
 | `GET` | `/api/shared` | signed in | documents sent to you, newest first — no markdown |
 | `POST` | `/api/share` | owner | `{owner, path, username}` — send a document to a person |
 | `DELETE` | `/api/share?owner&path&username` | owner | take it back |
@@ -225,6 +226,13 @@ wildcard, and nothing may follow it — plus one request shape then serves both
 sending and taking back. Unknown usernames answer `404`, sending to yourself
 `400`, and someone else's document `404` — the same answer as a missing one, so
 existence is never confirmed.
+
+The username field is an ordinary text input that suggests: typing asks
+`GET /api/users?q=<prefix>` and the browser shows the matches (a `datalist`), so
+the name can still be typed from memory. The answer carries usernames only —
+never emails or anything else about an account — and only to signed-in callers,
+and an empty `q` returns nothing rather than the whole list. `%` and `_` are
+escaped, so a username containing them is matched literally.
 
 ## Invites
 
@@ -334,8 +342,9 @@ node web/test/md.test.mjs   # markdown → HTML: frontmatter, AsciiMath, formula
 
 `ui.test.cjs` drives registration, the invite link, issuing and revoking
 invites, the create-document button, the folder tree, renaming, the desmos
-frame, sending a document to a username and the read-only view a recipient gets,
-and the error states against a stubbed API.
+frame, sending a document to a username, the username suggestions behind that
+field and the read-only view a recipient gets, and the error states against a
+stubbed API.
 `md.test.mjs` checks what happens to a document on the way to the page —
 frontmatter goes, backticks survive as AsciiMath delimiters instead of turning
 into `<code>`, LaTeX reaches the page untouched — first against a stub, then

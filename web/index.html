@@ -129,10 +129,13 @@
     </div>
     <form id="share-form" hidden>
       <label for="share-username">Кому отправить — юзернейм в облаке</label>
-      <input id="share-username" name="username" autocomplete="off" required>
+      <input id="share-username" name="username" list="people" autocomplete="off"
+             placeholder="vasilisa" required>
+      <datalist id="people"></datalist>
       <button type="submit">Отправить</button>
       <button id="share-cancel" type="button">Отмена</button>
-      <p class="hint">Человек увидит документ у себя в разделе «Со мной поделились».
+      <p class="hint">Начните набирать юзернейм — облако подскажет, кто есть.
+        Человек увидит документ у себя в разделе «Со мной поделились».
         Публичным документ от этого не становится: читать и комментировать может только
         тот, кому отправили, а править — только вы. Забрать обратно можно там же, под списком.</p>
     </form>
