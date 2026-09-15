@@ -42,9 +42,37 @@ body {
 }
 
 nav {
+  position: relative;
   display: flex;
   gap: 0.75rem;
   align-items: center;
+}
+
+/* Меню учётной записи: раскрывается под кнопкой, не сдвигая шапку. */
+#account-menu {
+  position: absolute;
+  top: calc(100% + 0.4rem);
+  right: 0;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  min-width: 12rem;
+  padding: 0.5rem;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+/* display у меню своё, поэтому закрытое состояние задаём явно: правила
+   браузера для [hidden] слабее селектора по id. */
+#account-menu[hidden] {
+  display: none;
+}
+
+#account-menu button {
+  align-self: stretch;
+  text-align: left;
 }
 
 main {
@@ -65,10 +93,6 @@ h2 {
 
 a {
   color: var(--accent);
-}
-
-.who {
-  color: var(--muted);
 }
 
 .meta {
@@ -149,6 +173,28 @@ a:focus-visible {
 
 .markdown {
   margin-top: 1rem;
+}
+
+/* Блок документа — одна строка-абзац: на неё можно встать (Tab, стрелки при
+   выборе строки) и сослаться из комментария. */
+.doc-block {
+  border-radius: 4px;
+}
+
+.doc-block:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 4px;
+}
+
+/* Ссылка на строку в комментарии — «строка 5». */
+.line-ref {
+  white-space: nowrap;
+}
+
+.hint {
+  color: var(--muted);
+  font-size: 0.95rem;
+  margin: 0.2rem 0 0;
 }
 
 .markdown pre {

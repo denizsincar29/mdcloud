@@ -21,13 +21,20 @@ export const ASM_CLOSE = "⁣¶ASMCLOSE¶⁣";
 // а читателю незачем видеть «title:» первой строкой. Незакрытый блок — не
 // frontmatter, а обычный текст: тогда документ остаётся как есть.
 export function stripFrontmatter(md) {
+  return splitFrontmatter(md).body;
+}
+
+// splitFrontmatter отдаёт и тело, и число снятых строк: номера строк в
+// комментариях считаются по исходнику документа, вместе с настройками, — те же
+// числа, что видит человек в редакторе.
+export function splitFrontmatter(md) {
   const text = md || "";
-  if (!/^---\r?\n/.test(text)) return text;
+  if (!/^---\r?\n/.test(text)) return { body: text, skipped: 0 };
   const lines = text.split(/\r?\n/);
   for (let i = 1; i < lines.length; i++) {
-    if (/^\s*---\s*$/.test(lines[i])) return lines.slice(i + 1).join("\n");
+    if (/^\s*---\s*$/.test(lines[i])) return { body: lines.slice(i + 1).join("\n"), skipped: i + 1 };
   }
-  return text;
+  return { body: text, skipped: 0 };
 }
 
 // protectAsciiMath прячет содержимое одиночных кавычек. Соседние кавычки не
@@ -45,9 +52,91 @@ export function restoreAsciiMath(html) {
   return (html || "").split(ASM_OPEN).join("`").split(ASM_CLOSE).join("`");
 }
 
-// markdownToHtml — весь путь мдшки: снять frontmatter, уберечь кавычки,
-// отдать showdown, вернуть кавычки. Конвертер приходит снаружи: showdown
-// грузится с CDN в браузере и в тесте подменяется заглушкой.
+// --- разбиение на блоки ------------------------------------------------------
+// Блоки нужны, чтобы на строку документа можно было встать и сослаться на неё
+// из комментария. Разбиваем так же, как предпросмотр редактора mathmd: блок —
+// абзац, список, цитата или ограждение целиком, с номером первой строки.
+
+function lineClass(line) {
+  if (/^\s*```/.test(line)) return "fence";
+  if (/^\s*[-+*]\s+/.test(line)) return "bullet";
+  if (/^\s*\d+[.)]\s+/.test(line)) return "ordered";
+  if (/^\s*>\s?/.test(line)) return "quote";
+  if (/^\s*#{1,6}\s+/.test(line)) return "heading";
+  if (/^\s*(---+|\*\*\*+|___+)\s*$/.test(line)) return "hr";
+  if (/^\s*\|.*\|\s*$/.test(line)) return "table";
+  return "text";
+}
+
+function canContinue(seg, line) {
+  if (line === "fence") return seg === "text";
+  switch (seg) {
+    case "heading":
+    case "hr":
+      return false;
+    case "bullet":
+      return line === "bullet" || line === "ordered" || line === "text";
+    case "ordered":
+      return line === "ordered" || line === "text";
+    case "quote":
+      return line !== "hr" && line !== "fence";
+    default:
+      return line === "text" || line === "table";
+  }
+}
+
+// segmentMarkdown режет markdown на блоки: {line — номер первой строки, text}.
+// Пробельные строки разделяют блоки, но ограждение не разрывают и список не
+// рвут посреди пунктов.
+export function segmentMarkdown(md) {
+  const lines = (md || "").split("\n");
+  const segments = [];
+  let i = 0;
+  while (i < lines.length) {
+    while (i < lines.length && lines[i].trim() === "") i++;
+    if (i >= lines.length) break;
+    const start = i;
+    const cls = lineClass(lines[i]);
+    const buf = [lines[i]];
+    i++;
+    let inFence = cls === "fence";
+    while (i < lines.length) {
+      const line = lines[i];
+      if (inFence) {
+        buf.push(line);
+        if (/^\s*```/.test(line)) inFence = false;
+        i++;
+        continue;
+      }
+      if (line.trim() === "") break;
+      const lc = lineClass(line);
+      if (canContinue(cls, lc)) {
+        buf.push(line);
+        if (lc === "fence") inFence = true;
+        i++;
+      } else {
+        break;
+      }
+    }
+    segments.push({ line: start + 1, text: buf.join("\n") });
+  }
+  return segments;
+}
+
+// markdownBlocks — весь путь мдшки по блокам: снять frontmatter, уберечь
+// кавычки, разбить, отдать showdown, вернуть кавычки. Конвертер приходит
+// снаружи: showdown грузится с CDN в браузере, в тесте — заглушкой.
+export function markdownBlocks(markdown, converter) {
+  const { body, skipped } = splitFrontmatter(markdown);
+  const prepared = protectAsciiMath(body);
+  return segmentMarkdown(prepared).map((seg) => ({
+    line: skipped + seg.line,
+    html: restoreAsciiMath(converter.makeHtml(seg.text)),
+  }));
+}
+
+// markdownToHtml — тот же путь, но одной строкой HTML: удобно там, где номеров
+// строк не нужно (экспорт, проверки).
 export function markdownToHtml(markdown, converter) {
-  return restoreAsciiMath(converter.makeHtml(protectAsciiMath(stripFrontmatter(markdown))));
+  return markdownBlocks(markdown, converter).map((block) => block.html).join("\n");
 }

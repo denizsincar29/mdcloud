@@ -74,7 +74,9 @@ function makeApi(overrides = {}) {
 }
 
 // boot поднимает страницу: index.html + app.js в одном окне jsdom.
-async function boot({ path = "/", hash = "", api } = {}) {
+// hooks подставляет то, чего в jsdom нет: модуль md.mjs, showdown и MathJax
+// грузятся страницей по сети, а тест даёт их заглушками через window.mdcloud*.
+async function boot({ path = "/", hash = "", api, hooks } = {}) {
   const dom = new JSDOM(html, {
     url: "https://mdcloud.denizsincar.ru" + path + hash,
     runScripts: "outside-only",
@@ -82,6 +84,7 @@ async function boot({ path = "/", hash = "", api } = {}) {
     virtualConsole: quietConsole(),
   });
   const w = dom.window;
+  Object.assign(w, hooks || {});
   const stub = api || makeApi();
   w.fetch = stub.fetch;
   w.eval(app);
@@ -93,6 +96,8 @@ async function boot({ path = "/", hash = "", api } = {}) {
 const submit = (w, form) =>
   form.dispatchEvent(new w.Event("submit", { bubbles: true, cancelable: true }));
 const click = (w, el) => el.dispatchEvent(new w.Event("click", { bubbles: true }));
+const key = (w, keyName, init = {}) =>
+  w.document.dispatchEvent(new w.KeyboardEvent("keydown", { key: keyName, bubbles: true, cancelable: true, ...init }));
 
 async function main() {
   // --- 1. Свежее облако: сразу форма регистрации ------------------------------
@@ -114,7 +119,10 @@ async function main() {
       call && call.init.body
     );
     ok("после регистрации видно документы", !$("index").hidden && $("register").hidden);
-    ok("кнопка приглашений появилась (хозяин)", $("invites-toggle").hidden === false);
+    ok("кнопка учётной записи появилась", $("account-toggle").hidden === false);
+    ok("имя владельца на кнопке", /deniz/.test($("account-toggle").textContent), $("account-toggle").textContent);
+    ok("меню учётной записи закрыто", $("account-menu").hidden === true);
+    ok("пункт приглашений есть (хозяин)", $("invites-toggle").hidden === false);
   }
 
   // --- 2. Ссылка-приглашение подставляет код ---------------------------------
@@ -139,8 +147,27 @@ async function main() {
     const { $, w, tick, stub } = await boot({ api });
     ok("вошедший видит свои документы", !$("index").hidden);
 
+    click(w, $("account-toggle"));
+    ok("кнопка раскрыла меню", $("account-menu").hidden === false);
+    ok("чтец экрана узнает, что меню раскрыто",
+      $("account-toggle").getAttribute("aria-expanded") === "true",
+      $("account-toggle").getAttribute("aria-expanded"));
+    ok("фокус встал на первый пункт меню",
+      w.document.activeElement === $("invites-toggle"), w.document.activeElement.id);
+
+    key(w, "Escape");
+    ok("Escape закрыл меню", $("account-menu").hidden === true);
+    ok("фокус вернулся на кнопку",
+      w.document.activeElement === $("account-toggle"), w.document.activeElement.id);
+
+    click(w, $("account-toggle"));
+    click(w, w.document.getElementById("main"));
+    ok("клик в стороне закрыл меню", $("account-menu").hidden === true);
+
+    click(w, $("account-toggle"));
     click(w, $("invites-toggle"));
     await tick();
+    ok("выбор пункта закрыл меню", $("account-menu").hidden === true);
     ok("открылся раздел приглашений", !$("invites").hidden);
     ok("список приглашений запрошен", stub.calls.some((c) => c.key === "GET /api/invites"));
     ok("видно, кому выписали", /Маше/.test($("invites-list").textContent), $("invites-list").textContent);
@@ -225,6 +252,111 @@ async function main() {
     });
     const { $ } = await boot({ path: "/vasilisa", api });
     ok("в чужом списке формы создания нет", $("new-doc-form").hidden === true);
+  }
+
+  // --- 8. Клик по пункту списка = клик по ссылке -----------------------------
+  {
+    const api = makeApi({
+      "GET /api/me": () => ({ status: 200, body: { user: { username: "deniz", is_admin: true } } }),
+      "GET /api/docs/deniz": () => ({
+        status: 200,
+        body: { docs: [{ path: "lab1", title: "Лаба", visibility: "public" }] },
+      }),
+    });
+    const { $, w } = await boot({ api });
+    // Переход на другую страницу в jsdom не работает — вместо него считаем
+    // нажатия: у ссылки спрашивают click(), значит, переход состоялся бы.
+    const opened = [];
+    w.HTMLAnchorElement.prototype.click = function () {
+      opened.push(this.getAttribute("href"));
+    };
+    const li = $("index-list").querySelector("li");
+    const a = li.querySelector("a");
+    ok("в списке есть ссылка", Boolean(a), $("index-list").innerHTML);
+
+    click(w, li);
+    ok("клик по пункту списка открывает тот же документ",
+      opened.length === 1 && opened[0] === "/deniz/lab1", JSON.stringify(opened));
+
+    click(w, a);
+    ok("клик по самой ссылке переход не удваивает", opened.length === 1, JSON.stringify(opened));
+  }
+
+  // --- 9. Комментарий ссылается на строку документа --------------------------
+  {
+    const blocks = [
+      { line: 1, html: "<p>Первая строка</p>" },
+      { line: 3, html: "<p>Вторая строка</p>" },
+      { line: 5, html: "<p>Третья строка</p>" },
+    ];
+    const api = makeApi({
+      "GET /api/me": () => ({ status: 200, body: { user: { username: "deniz", is_admin: true } } }),
+      "GET /api/docs/deniz/lab1": () => ({
+        status: 200,
+        body: {
+          owner: "deniz", path: "lab1", title: "Лаба",
+          content: "Первая строка\n\nВторая строка\n\nТретья строка",
+          visibility: "public", updated_at: "2026-09-15T10:00:00Z", can_edit: true,
+        },
+      }),
+      "GET /api/comments/deniz/lab1": () => ({
+        status: 200,
+        body: {
+          comments: [{
+            id: 1, body: "Вот здесь {line 3} — важно", author_name: "Дениз",
+            anonymous: false, mine: false, created_at: "2026-09-15T11:00:00Z",
+          }],
+          can_comment: true, comments_on: true, require_auth: false, viewer_authenticated: true,
+        },
+      }),
+    });
+    const { $, w } = await boot({
+      path: "/deniz/lab1",
+      api,
+      hooks: {
+        MathJax: { startup: { promise: Promise.resolve() }, typesetPromise: async () => {} },
+        mdcloudRenderers: { showdown: { makeHtml: (md) => "<p>" + md + "</p>" } },
+        mdcloudMd: { markdownBlocks: () => blocks },
+      },
+    });
+
+    const lines = [...w.document.querySelectorAll("#doc-body .doc-block")].map((b) => b.dataset.line);
+    ok("документ разложен по блокам с номерами строк", lines.join(",") === "1,3,5", JSON.stringify(lines));
+
+    // {line 3} в комментарии — ссылка, которая ведёт на ту же строку документа.
+    const link = $("comments").querySelector("a.line-ref");
+    ok("ссылка на строку показана как «строка 3»",
+      Boolean(link) && link.textContent === "строка 3", $("comments").innerHTML);
+    click(w, link);
+    ok("переход по ссылке ставит фокус на строку документа",
+      w.document.activeElement.id === "line-3", w.document.activeElement.id || w.document.activeElement.tagName);
+
+    // Пишем комментарий, встаём курсором после «Вот здесь» и указываем строку.
+    const field = $("comment-body");
+    const submitButton = $("comment-form").querySelector('button[type="submit"]');
+    submitButton.dispatchEvent(new w.Event("focusin", { bubbles: true }));
+
+    field.focus();
+    field.value = "Вот здесь";
+    field.setSelectionRange(9, 9); // курсор после «Вот здесь»
+    field.dispatchEvent(new w.Event("keyup", { bubbles: true }));
+
+    click(w, $("comment-line"));
+    ok("выбор строки начался с первой строки",
+      w.document.activeElement.dataset.line === "1", w.document.activeElement.dataset.line || w.document.activeElement.tagName);
+    key(w, "ArrowDown");
+    ok("стрелка вниз ведёт на следующую строку",
+      w.document.activeElement.dataset.line === "3", w.document.activeElement.dataset.line || w.document.activeElement.tagName);
+    key(w, "Enter");
+    ok("Enter вставил ссылку туда, где писал", field.value === "Вот здесь{line 3}", field.value);
+    ok("фокус вернулся в комментарий", w.document.activeElement === field, w.document.activeElement.tagName);
+
+    key(w, "Escape");
+    $("line-5").focus();
+    ok("ушли в документ", w.document.activeElement.id === "line-5", w.document.activeElement.id);
+    key(w, "b", { code: "KeyB", altKey: true });
+    ok("Alt+B вернул к последней нажатой кнопке комментария",
+      w.document.activeElement === submitButton, w.document.activeElement.tagName);
   }
 }
 

@@ -79,6 +79,9 @@ async function api(path, opts = {}) {
 // Библиотеки тянем по требованию: без CDN страница всё равно должна
 // открываться и логинить, просто без отрендеренного текста.
 async function renderers() {
+  // window.mdcloudRenderers — только для теста: в jsdom нет ни import(), ни
+  // сети, и страница проверяется с подставленным конвертером.
+  if (window.mdcloudRenderers) return (state.renderers = window.mdcloudRenderers);
   if (!state.renderers) {
     const showdownMod = await import("https://cdn.jsdelivr.net/npm/showdown@2.1.0/+esm");
     const showdown = new (showdownMod.default || showdownMod).Converter({
@@ -116,15 +119,32 @@ const chessExtension = {
 // web/test/ui.test.cjs). Один лишний запрос, дальше модуль в кеше браузера.
 let mdModule = null;
 function mdTools() {
-  if (!mdModule) mdModule = import("./md.mjs");
+  // window.mdcloudMd — только для теста: в jsdom динамический import не
+  // работает, и страница проверяется с подставленным модулем.
+  if (!mdModule) mdModule = window.mdcloudMd ? Promise.resolve(window.mdcloudMd) : import("./md.mjs");
   return mdModule;
 }
 
-async function renderMarkdown(markdown) {
-  const [{ showdown }, { markdownToHtml }] = await Promise.all([renderers(), mdTools()]);
-  // Готовый HTML больше ничем не чистим: страницу защищает CSP, а не список
-  // разрешённых тегов (см. deploy/Caddyfile.snippet).
-  return markdownToHtml(markdown, showdown);
+// paintDocument раскладывает документ по блокам: строка-абзац становится
+// отдельным div с номером первой строки, на неё можно встать (Tab, клик) и
+// сослаться из комментария. Номера считаются по исходнику документа, включая
+// frontmatter, — те же числа, что человек видит в редакторе.
+//
+// Готовый HTML ничем не чистим: страницу защищает CSP, а не список разрешённых
+// тегов (см. deploy/Caddyfile.snippet).
+async function paintDocument(markdown, into) {
+  const [{ showdown }, { markdownBlocks }] = await Promise.all([renderers(), mdTools()]);
+  into.replaceChildren();
+  for (const block of markdownBlocks(markdown, showdown)) {
+    const div = document.createElement("div");
+    div.className = "doc-block";
+    div.dataset.line = String(block.line);
+    div.id = "line-" + block.line;
+    div.tabIndex = 0;
+    div.innerHTML = block.html;
+    into.append(div);
+  }
+  return into;
 }
 
 // ------------------------------------------------------------------ формулы
@@ -141,6 +161,9 @@ let mathjaxLoading = null;
 // загрузки скрипта, поэтому он здесь, а не в разметке: инлайновый <script> на
 // странице запрещён её же CSP.
 function loadMathJax() {
+  // MathJax уже на странице (или подставлен тестом) — свой конфиг не навязываем
+  // и второй раз не грузим.
+  if (window.MathJax && window.MathJax.typesetPromise) return Promise.resolve(window.MathJax);
   if (!mathjaxLoading) {
     window.MathJax = {
       loader: { load: ["input/tex", "input/asciimath", "output/chtml"] },
@@ -181,15 +204,165 @@ async function typesetMath(root) {
   }
 }
 
+// ------------------------------------------------------------------ строки
+
+// Указание на строку документа из комментария: человек пишет «вот здесь»,
+// нажимает «Указать на строку документа», ходит по блокам стрелками, а Enter
+// вставляет в текст ссылку {line 5}. Читатель комментария переходит по ней на
+// ту же строку — поэтому блоки предпросмотра пронумерованы по исходнику.
+const picker = { on: false, index: 0 };
+
+function docBlocks() {
+  return [...el("doc-body").querySelectorAll(".doc-block")];
+}
+
+// blockByLine — блок, с которого начинается строка line (или ближайший
+// предыдущий): ссылка может указывать на строку внутри абзаца.
+function blockByLine(line) {
+  const blocks = docBlocks();
+  let found = null;
+  for (const block of blocks) {
+    if (Number(block.dataset.line) <= line) found = block;
+    else break;
+  }
+  return found || blocks[0] || null;
+}
+
+// Кнопка, к которой возвращаемся: последняя нажатая в форме комментария.
+// Alt+B (и возврат после вставки ссылки) ведут на неё, а если ничего не
+// нажимали — в поле комментария.
+let lastCommentButton = null;
+
+function commentAnchor() {
+  return lastCommentButton && document.body.contains(lastCommentButton)
+    ? lastCommentButton
+    : el("comment-body");
+}
+
+// Где стоит курсор в комментарии. Пока фокус в поле, это selectionStart; после
+// ухода в документ — место, где он был: ссылка встаёт туда, где человек писал.
+let caret = 0;
+
+function commentCaret() {
+  const field = el("comment-body");
+  if (document.activeElement === field) caret = field.selectionStart ?? field.value.length;
+  return Math.min(caret, field.value.length);
+}
+
+function startPicking() {
+  const blocks = docBlocks();
+  if (!blocks.length) {
+    status("Строк пока нет — документ ещё не отрисован.");
+    return;
+  }
+  picker.on = true;
+  picker.index = 0;
+  blocks[0].focus();
+  status("Выбираю строку: стрелки вверх и вниз — по строкам, Enter — вставить ссылку, Escape — отмена.");
+}
+
+function stopPicking() {
+  picker.on = false;
+}
+
+function movePick(step) {
+  const blocks = docBlocks();
+  if (!blocks.length) return;
+  picker.index = Math.min(blocks.length - 1, Math.max(0, picker.index + step));
+  blocks[picker.index].focus();
+}
+
+// insertLineRef дописывает {line N} туда, где человек писал, и возвращает
+// фокус в комментарий — «вставилось, пиши дальше».
+function insertLineRef(line) {
+  const field = el("comment-body");
+  const at = commentCaret();
+  const ref = "{line " + line + "}";
+  field.value = field.value.slice(0, at) + ref + field.value.slice(at);
+  caret = at + ref.length;
+  field.focus();
+  field.setSelectionRange(caret, caret);
+  status("Строка " + line + " вставлена.");
+}
+
+// focusLine — переход по ссылке {line N}: ставим фокус на строку документа,
+// её прочитает чтец экрана.
+function focusLine(line) {
+  const block = blockByLine(line);
+  if (!block) {
+    status("Такой строки в документе нет.");
+    return;
+  }
+  // scrollIntoView есть не везде (в тесте страницы его нет) — на переход это
+  // не влияет: фокус браузер и сам подтянет к видимой части.
+  if (block.scrollIntoView) block.scrollIntoView({ block: "center" });
+  block.focus();
+}
+
+// paintCommentBody показывает текст комментария, превращая {line N} в ссылку.
+// Собираем через текстовые узлы: в комментариях разметке места нет.
+const LINE_REF = /\{line (\d+)\}/g;
+
+function paintCommentBody(into, text) {
+  into.replaceChildren();
+  let last = 0;
+  for (const match of (text || "").matchAll(LINE_REF)) {
+    if (match.index > last) into.append(document.createTextNode(text.slice(last, match.index)));
+    const line = Number(match[1]);
+    const link = document.createElement("a");
+    link.href = "#line-" + line;
+    link.className = "line-ref";
+    link.textContent = "строка " + line;
+    link.addEventListener("click", (event) => {
+      event.preventDefault();
+      focusLine(line);
+    });
+    into.append(link);
+    last = match.index + match[0].length;
+  }
+  if (last < (text || "").length) into.append(document.createTextNode(text.slice(last)));
+}
+
 // ------------------------------------------------------------------ шапка
+
+// Учётная запись — меню, а не ряд кнопок: «Выйти» рядом с «Приглашениями»
+// слишком легко нажать мимо. Кнопка в шапке раскрывает список, Escape и клик
+// в стороне его закрывают, при раскрытии фокус сразу встаёт на первый пункт —
+// чтец экрана читает «меню раскрыто, Приглашения, кнопка».
+function accountMenu() {
+  return el("account-menu");
+}
+
+function accountMenuOpen() {
+  return !accountMenu().hidden;
+}
+
+function openAccountMenu() {
+  accountMenu().hidden = false;
+  el("account-toggle").setAttribute("aria-expanded", "true");
+  const first = accountMenu().querySelector("button:not([hidden])");
+  if (first) first.focus();
+}
+
+function closeAccountMenu({ focus = false } = {}) {
+  accountMenu().hidden = true;
+  el("account-toggle").setAttribute("aria-expanded", "false");
+  if (focus) el("account-toggle").focus();
+}
+
+function toggleAccountMenu() {
+  if (accountMenuOpen()) closeAccountMenu({ focus: true });
+  else openAccountMenu();
+}
 
 function paintAuth() {
   const logged = Boolean(state.user);
-  el("who").hidden = !logged;
-  el("who").textContent = logged ? state.user.username : "";
-  el("logout").hidden = !logged;
+  const toggle = el("account-toggle");
+  toggle.hidden = !logged;
+  toggle.textContent = logged ? "Учётная запись: " + state.user.username : "Учётная запись";
   el("login-toggle").hidden = logged;
   el("invites-toggle").hidden = !(logged && state.user.is_admin);
+  if (!logged) closeAccountMenu();
 }
 
 // ------------------------------------------------------------------ экраны
@@ -273,6 +446,13 @@ async function openIndex(owner) {
       mark.textContent = " — закрытый";
       li.append(mark);
     }
+    // Ссылка остаётся ссылкой, но попасть по ней можно и мимо текста: клик по
+    // всей строке списка нажимает на неё. Так до неё доходит и чтец экрана,
+    // который в режиме обзора попадает на пункт списка, а не на ссылку.
+    li.addEventListener("click", (event) => {
+      if (event.target.closest("a")) return; // по ссылке — обычный переход
+      a.click();
+    });
     list.append(li);
   }
   if (!data.docs.length) {
@@ -300,7 +480,7 @@ async function openDoc(owner, path) {
 
   const body = el("doc-body");
   try {
-    body.innerHTML = await renderMarkdown(doc.content);
+    await paintDocument(doc.content, body);
     await typesetMath(body);
   } catch (err) {
     body.replaceChildren();
@@ -335,7 +515,9 @@ async function loadComments(owner, doc) {
       ? c.author_name + " (без входа) · " + new Date(c.created_at).toLocaleString("ru-RU")
       : c.author_name + " · " + new Date(c.created_at).toLocaleString("ru-RU");
     const body = document.createElement("p");
-    body.textContent = c.body; // только текстом: разметке в комментариях не место
+    // Только текстом: разметке в комментариях не место. Исключение — ссылки на
+    // строки {line N}: они собираются узлами, а не разбором HTML.
+    paintCommentBody(body, c.body);
     li.append(head, body);
     if (c.mine) {
       const del = document.createElement("button");
@@ -456,11 +638,21 @@ async function render() {
 // ------------------------------------------------------------------ события
 
 el("login-toggle").addEventListener("click", () => openLogin(""));
+el("account-toggle").addEventListener("click", toggleAccountMenu);
+// Клик в стороне закрывает меню — но не клик по самой кнопке: её обрабатывает
+// toggleAccountMenu, иначе меню закрывалось бы сразу после раскрытия.
+document.addEventListener("click", (event) => {
+  if (!accountMenuOpen()) return;
+  if (event.target.closest && (event.target.closest("#account-menu") || event.target.closest("#account-toggle"))) return;
+  closeAccountMenu();
+});
 el("invites-toggle").addEventListener("click", () => {
+  closeAccountMenu();
   location.hash = "#invites";
   render();
 });
 el("logout").addEventListener("click", async () => {
+  closeAccountMenu();
   try {
     await api("/api/auth/logout", { method: "POST" });
   } catch {
@@ -590,6 +782,80 @@ el("toggle-vis").addEventListener("click", async () => {
     status(next === "public" ? "Документ открыт для всех." : "Документ закрыт.");
   } catch (err) {
     fail(err);
+  }
+});
+
+// Последняя нажатая кнопка формы комментария — к ней ведёт Alt+B.
+el("comment-form").addEventListener("focusin", (event) => {
+  if (event.target.closest("button")) lastCommentButton = event.target.closest("button");
+});
+for (const type of ["keyup", "click", "select", "blur"]) {
+  el("comment-body").addEventListener(type, commentCaret);
+}
+
+el("comment-line").addEventListener("click", startPicking);
+
+// Enter или клик по блоку вставляет ссылку; вне выбора клик по документу
+// ничего не делает — читать его можно спокойно.
+el("doc-body").addEventListener("click", (event) => {
+  const block = event.target.closest(".doc-block");
+  if (!block || !picker.on) return;
+  insertLineRef(Number(block.dataset.line));
+  stopPicking();
+});
+
+el("doc-body").addEventListener("focusin", (event) => {
+  const block = event.target.closest(".doc-block");
+  if (!block) return;
+  const index = docBlocks().indexOf(block);
+  if (index >= 0) picker.index = index;
+  if (picker.on) status("Строка " + block.dataset.line + ".");
+});
+
+document.addEventListener("keydown", (event) => {
+  // Escape закрывает меню учётной записи, где бы внутри него ни стоял фокус,
+  // и возвращает его на кнопку меню.
+  if (event.key === "Escape" && accountMenuOpen()) {
+    event.preventDefault();
+    closeAccountMenu({ focus: true });
+    return;
+  }
+  // Alt+B — назад к комментарию, где бы человек ни был: и после выбора строки,
+  // и просто заглянув в документ. Код клавиши, а не буква: раскладка разная.
+  if (event.altKey && event.code === "KeyB") {
+    event.preventDefault();
+    commentAnchor().focus();
+    status("Вернулся к комментарию.");
+    return;
+  }
+  if (!picker.on) return;
+  const blocks = docBlocks();
+  switch (event.key) {
+    case "ArrowDown": event.preventDefault(); movePick(1); break;
+    case "ArrowUp": event.preventDefault(); movePick(-1); break;
+    case "PageDown": event.preventDefault(); movePick(10); break;
+    case "PageUp": event.preventDefault(); movePick(-10); break;
+    case "Home": event.preventDefault(); picker.index = 0; blocks[0]?.focus(); break;
+    case "End": event.preventDefault(); picker.index = blocks.length - 1; blocks.at(-1)?.focus(); break;
+    case "Enter": {
+      event.preventDefault();
+      const block = blocks[picker.index];
+      if (block) {
+        // После вставки фокус остаётся в комментарии, у самой ссылки: человек
+        // дописывает дальше с того же места (insertLineRef ставит туда курсор).
+        insertLineRef(Number(block.dataset.line));
+        stopPicking();
+      }
+      break;
+    }
+    case "Escape":
+      event.preventDefault();
+      stopPicking();
+      commentAnchor().focus();
+      status("Выбор строки отменил.");
+      break;
+    default:
+      break;
   }
 });
 

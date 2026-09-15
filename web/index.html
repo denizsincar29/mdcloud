@@ -11,9 +11,11 @@
 <header class="bar">
   <a class="brand" href="/">mdcloud</a>
   <nav aria-label="Учётная запись">
-    <span id="who" class="who" hidden></span>
-    <button id="invites-toggle" type="button" hidden>Приглашения</button>
-    <button id="logout" type="button" hidden>Выйти</button>
+    <button id="account-toggle" type="button" aria-expanded="false" aria-controls="account-menu" hidden>Учётная запись</button>
+    <div id="account-menu" hidden>
+      <button id="invites-toggle" type="button" hidden>Приглашения</button>
+      <button id="logout" type="button">Выйти</button>
+    </div>
     <button id="login-toggle" type="button">Войти</button>
   </nav>
 </header>
@@ -105,6 +107,10 @@
         </p>
         <label for="comment-body">Комментарий</label>
         <textarea id="comment-body" name="body" rows="5" required></textarea>
+        <p class="hint" id="comment-line-hint">Сослаться на строку документа: нажмите
+          «Указать на строку документа», выберите строку стрелками, Enter — и в текст встанет
+          {line 5}. Alt+B возвращает из документа обратно к комментарию.</p>
+        <button id="comment-line" type="button">Указать на строку документа</button>
         <button type="submit">Отправить</button>
       </form>
       <p id="comment-closed" class="meta" hidden>Комментарии к этому документу выключены.</p>

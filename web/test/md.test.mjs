@@ -8,7 +8,8 @@ import { createRequire } from "node:module";
 import { execSync } from "node:child_process";
 import path from "node:path";
 import {
-  ASM_OPEN, ASM_CLOSE, stripFrontmatter, protectAsciiMath, restoreAsciiMath, markdownToHtml,
+  ASM_OPEN, ASM_CLOSE, stripFrontmatter, protectAsciiMath, restoreAsciiMath,
+  markdownBlocks, markdownToHtml, segmentMarkdown, splitFrontmatter,
 } from "../md.mjs";
 
 let failed = 0;
@@ -17,6 +18,8 @@ function ok(name, cond, extra) {
   if (!cond) failed++;
 }
 const eq = (name, got, want) => ok(name, got === want, { got, want });
+const eqDeep = (name, got, want) =>
+  ok(name, JSON.stringify(got) === JSON.stringify(want), { got, want });
 
 // --- frontmatter ------------------------------------------------------------
 eq("frontmatter снят",
@@ -75,6 +78,31 @@ eq("LaTeX конвертер не трогает — до него дойдёт 
 eq("frontmatter до конвертера не доезжает",
   markdownToHtml("---\ntitle: Морфи\n---\nТело", echo),
   "<p>Тело</p>");
+
+// --- разбиение на блоки -----------------------------------------------------
+eqDeep("абзацы становятся отдельными блоками с номерами строк",
+  segmentMarkdown("первый абзац\n\nвторой абзац"),
+  [{ line: 1, text: "первый абзац" }, { line: 3, text: "второй абзац" }]);
+
+eq("список не рвётся на пунктах",
+  segmentMarkdown("- раз\n- два\n- три").length,
+  1);
+
+eq("пустая строка внутри ограждения блок не рвёт",
+  segmentMarkdown("```js\nlet a = 1;\n\nlet b = 2;\n```").length,
+  1);
+
+eq("пустая строка внутри ограждения блок не рвёт (проверка текста)",
+  segmentMarkdown("```js\nlet a = 1;\n\nlet b = 2;\n```")[0].text,
+  "```js\nlet a = 1;\n\nlet b = 2;\n```");
+
+eq("frontmatter сдвигает номера строк, а не сбивает их",
+  segmentMarkdown(splitFrontmatter("---\ntitle: Морфи\n---\n\n# Партия").body)[0].line,
+  2);
+
+eq("splitFrontmatter говорит, сколько строк снял",
+  splitFrontmatter("---\ntitle: Морфи\n---\nтело").skipped,
+  3);
 
 // --- то же самое, но с настоящим showdown -----------------------------------
 // Заглушка выше проверяет наш код, а не стык с конвертером: важно убедиться,
