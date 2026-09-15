@@ -103,6 +103,18 @@ const key = (w, keyName, init = {}) =>
   w.document.dispatchEvent(new w.KeyboardEvent("keydown", { key: keyName, bubbles: true, cancelable: true, ...init }));
 
 async function main() {
+  // --- 0. Скрытое должно быть скрыто ------------------------------------------
+  // У форм и у меню свой display, а авторское правило сильнее браузерного
+  // [hidden]: без !important скрытые формы остаются на экране, и скринридер
+  // читает их подряд вместе с документом. jsdom этот случай не ловит — у него
+  // каскад проще браузерного («кто последний, тот и прав»), поэтому смотрим
+  // по файлу: правило обязано быть на месте.
+  {
+    const css = fs.readFileSync(path.join(WEB, "style.css"), "utf8");
+    ok("в style.css есть [hidden] с !important",
+      /\[hidden\]\s*\{[^}]*display:\s*none\s*!important/.test(css));
+  }
+
   // --- 1. Свежее облако: сразу форма регистрации ------------------------------
   {
     const { w, $, stub, tick } = await boot();
