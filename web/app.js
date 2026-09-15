@@ -301,6 +301,11 @@ function insertLineRef(line) {
 
 // focusLine — переход по ссылке {line N}: ставим фокус на строку документа,
 // её прочитает чтец экрана.
+//
+// Одного focus() чтецам мало: курсор чтения при этом остаётся там, где был, и
+// человек слышит документ с начала. Поэтому строку ещё и называем вслух через
+// живой область статуса — «Строка 5: …» доходит всегда, чем бы ни закончился
+// перевод фокуса. Сам переход делает браузер по якорю #line-N (см. lineRefLink).
 function focusLine(line) {
   const block = blockByLine(line);
   if (!block) {
@@ -311,6 +316,8 @@ function focusLine(line) {
   // не влияет: фокус браузер и сам подтянет к видимой части.
   if (block.scrollIntoView) block.scrollIntoView({ block: "center" });
   block.focus();
+  const text = (block.textContent || "").replace(/\s+/g, " ").trim();
+  status("Строка " + block.dataset.line + (text ? ": " + text.slice(0, 80) : ""));
 }
 
 // paintCommentBody показывает текст комментария, превращая ссылку на строку в
@@ -324,8 +331,10 @@ function lineRefLink(label, line) {
   link.href = "#line-" + line;
   link.className = "line-ref";
   link.textContent = label;
-  link.addEventListener("click", (event) => {
-    event.preventDefault();
+  // Переход по якорю не отменяем: браузер сам переносит и экран, и курсор
+  // чтения чтеца экрана на строку — это работает надёжнее, чем focus()
+  // вручную (см. focusLine). Наш обработчик только дописывает фокус и подпись.
+  link.addEventListener("click", () => {
     // Запоминаем саму ссылку — Alt+B вернёт сюда же.
     lastCommentAnchor = link;
     focusLine(line);

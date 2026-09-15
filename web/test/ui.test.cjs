@@ -339,6 +339,9 @@ async function main() {
     click(w, links[1]);
     ok("переход по ссылке ставит фокус на строку документа",
       w.document.activeElement.id === "line-5", w.document.activeElement.id || w.document.activeElement.tagName);
+    // Фокуса чтецам мало: строку называем вслух в живом области статуса.
+    ok("строка названа вслух в статусе",
+      /Строка 5/.test($("status").textContent), $("status").textContent);
     key(w, "b", { code: "KeyB", altKey: true });
     ok("Alt+B вернул на ту самую ссылку в комментарии",
       w.document.activeElement === links[1], w.document.activeElement.tagName);
