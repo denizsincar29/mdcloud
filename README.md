@@ -200,6 +200,16 @@ nor the network. They cover document visibility, ownership, comment rules,
 first-user/admin rules, invite redemption and expiry, cookie flags, CSRF and
 CORS, token lifecycle and path validation.
 
+The web page has its own smoke test (jsdom, no browser):
+
+```bash
+npm install -g jsdom
+node web/test/ui.test.cjs
+```
+
+It drives registration, the invite link, issuing and revoking invites and the
+error states against a stubbed API.
+
 ## Not done yet
 
 - The preview renders markdown in the browser; it does not yet reproduce the
