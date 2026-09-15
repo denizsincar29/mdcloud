@@ -139,11 +139,6 @@ function show(id) {
   for (const name of SCREENS) el(name).hidden = name !== id;
 }
 
-// На главной без входа показывать нечего — прячем все экраны.
-function showNothing() {
-  show(null);
-}
-
 // registration — что можно рассказать про регистрацию по ответу /api/config:
 // первый (место хозяина свободно), открытая, по приглашению или закрыта.
 function registration() {
@@ -374,8 +369,10 @@ async function render() {
       if (state.user) {
         await openIndex(state.user.username);
       } else {
-        showNothing();
-        status("Укажите адрес документа: /имя/папка/файл. Или войдите в шапке страницы.");
+        // Не вошедшему на главной показывать нечего, поэтому не прячем экраны,
+        // а сразу показываем форму: на новом облаке она же ведёт к регистрации.
+        // Чужой документ и так открывается по прямому адресу /имя/папка/файл.
+        await openLogin("");
       }
       return;
     }
