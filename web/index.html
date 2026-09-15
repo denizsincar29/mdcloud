@@ -75,6 +75,11 @@
 
   <section id="index" hidden aria-labelledby="index-h">
     <h1 id="index-h">Документы</h1>
+    <form id="new-doc-form" hidden>
+      <label for="new-doc-path">Новый документ — путь в облаке</label>
+      <input id="new-doc-path" name="path" autocomplete="off" placeholder="ДЗ/ИИ/задачи" required>
+      <button type="submit">Создать документ</button>
+    </form>
     <ul id="index-list" class="doclist"></ul>
   </section>
 

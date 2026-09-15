@@ -21,6 +21,18 @@ const state = {
 
 const el = (id) => document.getElementById(id);
 
+// editorUrl собирает адрес mathmd на документе owner/path. Путь едет во
+// фрагменте (браузер не отправляет его на сервер), а сегменты экранируются
+// по отдельности — иначе кириллица и «/» в имени сломают разбор в редакторе.
+function editorUrl(base, owner, path) {
+  return base + "/#cloud=" +
+    (owner + "/" + path).split("/").map(encodeURIComponent).join("/");
+}
+
+// Наружу — нарочно: страница живёт одним файлом без модулей, и это
+// единственный способ проверить сборку адреса тестом (web/test/ui.test.cjs).
+window.mdcloudEditorUrl = editorUrl;
+
 function status(text) {
   el("status").textContent = text || "";
 }
@@ -191,6 +203,10 @@ async function openRegister(invite) {
 
 async function openIndex(owner) {
   show("index");
+  // Завести документ можно только у себя: у чужого списка формы нет.
+  const mine = Boolean(state.user && state.user.username === owner);
+  el("new-doc-form").hidden = !mine;
+  el("new-doc-form").dataset.owner = owner;
   const data = await api("/api/docs/" + encodeURIComponent(owner));
   el("index-h").textContent = "Документы: " + owner;
   document.title = "Документы: " + owner + " — mdcloud";
@@ -478,17 +494,36 @@ el("invites-back").addEventListener("click", () => {
   render();
 });
 
-// «Редактировать» уводит в mathmd на этом документе. Путь едет во фрагменте
+// openInEditor уводит в mathmd на документе owner/path. Путь едет во фрагменте
 // адреса: редактор читает его и сам идёт в API — с той же кукой, что уже
-// есть у браузера.
-el("edit").addEventListener("click", () => {
+// есть у браузера. Если документа ещё нет, редактор откроет пустой лист с
+// этим адресом, и Ctrl+S его заведёт.
+function openInEditor(owner, path) {
   const base = (state.config && state.config.editor) || "";
   if (!base) {
     status("Не знаю адрес редактора — обновите страницу.");
     return;
   }
-  const loc = state.doc.owner + "/" + state.doc.path;
-  location.href = base + "/#cloud=" + loc.split("/").map(encodeURIComponent).join("/");
+  location.href = window.mdcloudEditorUrl(base, owner, path);
+}
+
+el("edit").addEventListener("click", () => {
+  openInEditor(state.doc.owner, state.doc.path);
+});
+
+el("new-doc-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  // Путь чистим так же, как редактор при сохранении: пробелы и лишние слэши
+  // сервер не примет, поэтому приводим адрес в порядок здесь, а не отказом
+  // потом, когда человек уже написал документ.
+  const path = el("new-doc-path").value.trim()
+    .replace(/^\/+/, "")
+    .replace(/\s+/g, "-")
+    .split("/")
+    .filter(Boolean)
+    .join("/");
+  if (!path) return;
+  openInEditor(event.currentTarget.dataset.owner, path);
 });
 
 el("toggle-vis").addEventListener("click", async () => {

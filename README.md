@@ -25,6 +25,9 @@ never send to a server.
 - **Stack:** Go (stdlib `net/http`), GORM, PostgreSQL. One binary, no CGO.
 - **Documents** are rows in the database (`owner_id` + `path`), so moving,
   backing up or re-permissioning is an `UPDATE`, not a file shuffle.
+- **Creating a document** starts in the editor: your index page has a path
+  field and a **Создать документ** button that opens mathmd on that address;
+  `Ctrl+S` there creates the document in the cloud.
 - **Visibility** is per document: `public` or `private`, private is the default.
 - **Comments** can be anonymous (with a name you type) or from a logged-in user.
 - **Registration is by invitation.** The first account is the cloud owner: they
@@ -207,8 +210,8 @@ npm install -g jsdom
 node web/test/ui.test.cjs
 ```
 
-It drives registration, the invite link, issuing and revoking invites and the
-error states against a stubbed API.
+It drives registration, the invite link, issuing and revoking invites, the
+create-document button and the error states against a stubbed API.
 
 ## Not done yet
 

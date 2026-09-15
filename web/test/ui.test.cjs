@@ -17,7 +17,18 @@ function loadJsdom() {
     return require(path.join(root, "jsdom"));
   }
 }
-const { JSDOM } = loadJsdom();
+const { JSDOM, VirtualConsole } = loadJsdom();
+
+// jsdom не умеет переходы на другую страницу и ругается на них в консоль.
+// Нам переходы и не нужны: адрес редактора проверяем через
+// window.mdcloudEditorUrl, а сам «уход» глушим.
+function quietConsole() {
+  const vc = new VirtualConsole();
+  vc.on("jsdomError", (err) => {
+    if (!/Not implemented: navigation/.test(err.message)) console.error(err.message);
+  });
+  return vc;
+}
 
 const WEB = path.join(__dirname, "..");
 const html = fs.readFileSync(path.join(WEB, "index.html"), "utf8");
@@ -63,11 +74,12 @@ function makeApi(overrides = {}) {
 }
 
 // boot поднимает страницу: index.html + app.js в одном окне jsdom.
-async function boot({ hash = "", api } = {}) {
+async function boot({ path = "/", hash = "", api } = {}) {
   const dom = new JSDOM(html, {
-    url: "https://mdcloud.denizsincar.ru/" + hash,
+    url: "https://mdcloud.denizsincar.ru" + path + hash,
     runScripts: "outside-only",
     pretendToBeVisual: true,
+    virtualConsole: quietConsole(),
   });
   const w = dom.window;
   const stub = api || makeApi();
@@ -82,7 +94,7 @@ const submit = (w, form) =>
   form.dispatchEvent(new w.Event("submit", { bubbles: true, cancelable: true }));
 const click = (w, el) => el.dispatchEvent(new w.Event("click", { bubbles: true }));
 
-(async function main() {
+async function main() {
   // --- 1. Свежее облако: сразу форма регистрации ------------------------------
   {
     const { w, $, stub, tick } = await boot();
@@ -140,7 +152,8 @@ const click = (w, el) => el.dispatchEvent(new w.Event("click", { bubbles: true }
     const call = stub.calls.find((c) => c.key === "POST /api/invites");
     ok("приглашение выписано через API", Boolean(call), JSON.stringify(stub.calls.map((c) => c.key)));
     ok("ссылка показана", !$("invite-fresh").hidden && $("invite-link").value.includes("#invite="), $("invite-link").value);
-    ok("сказано, что ссылка показывается один раз", /один раз/.test($("status").textContent), $("status").textContent);
+    ok("сказано, что ссылку потом не показать",
+      /показать не получится/.test($("status").textContent), $("status").textContent);
 
     const revoke = [...w.document.querySelectorAll("#invites-list button")][0];
     ok("у живого приглашения есть кнопка отзыва", Boolean(revoke), $("invites-list").innerHTML);
@@ -156,6 +169,10 @@ const click = (w, el) => el.dispatchEvent(new w.Event("click", { bubbles: true }
       "POST /api/auth/register": () => ({ status: 403, body: { error: "приглашение не подошло" } }),
     });
     const { $, w, tick } = await boot({ api });
+    // На экран регистрации надо сначала попасть: boot открывает вход.
+    click(w, $("register-toggle"));
+    await tick();
+    ok("кнопка регистрации открыла форму", !$("register").hidden);
     ok("при режиме «по приглашению» поле кода видно", $("register-invite-row").hidden === false);
     $("register-name").value = "petya";
     $("register-pass").value = "parol1234";
@@ -173,7 +190,49 @@ const click = (w, el) => el.dispatchEvent(new w.Event("click", { bubbles: true }
     ok("подсказка про закрытую регистрацию", /закрыта/i.test($("register-hint").textContent), $("register-hint").textContent);
   }
 
-})();
+  // --- 6. Создать документ: путь собирается и уводит в редактор --------------
+  {
+    const api = makeApi({ "GET /api/me": () => ({ status: 200, body: { user: { username: "deniz", is_admin: true } } }) });
+    const { $, w, tick } = await boot({ api });
+    ok("у себя видно форму создания документа", $("new-doc-form").hidden === false);
 
-console.log(failed ? "\nПРОВАЛОВ: " + failed : "\nвсё чисто");
-process.exit(failed ? 1 : 0);
+    const real = w.mdcloudEditorUrl;
+    let seen = null;
+    w.mdcloudEditorUrl = (base, owner, path) => {
+      seen = { base, owner, path };
+      return real(base, owner, path);
+    };
+    $("new-doc-path").value = "  /ДЗ/ИИ/задачи  ";
+    submit(w, $("new-doc-form"));
+    await tick();
+    ok("форма берёт хозяина списка", seen && seen.owner === "deniz", JSON.stringify(seen));
+    ok("путь очищен от пробелов и ведущего слэша", seen && seen.path === "ДЗ/ИИ/задачи", JSON.stringify(seen));
+    $("new-doc-path").value = "  мои  задачи//две  ";
+    submit(w, $("new-doc-form"));
+    ok("пробелы стали дефисами, лишние слэши ушли",
+      seen && seen.path === "мои-задачи/две", JSON.stringify(seen));
+    ok("база — адрес редактора с сервера", seen && seen.base === "https://mathmd.denizsincar.ru", JSON.stringify(seen));
+    const url = real("https://mathmd.denizsincar.ru", "deniz", "ДЗ/ИИ/задачи");
+    ok("кириллица в пути экранируется посегментно",
+      url === "https://mathmd.denizsincar.ru/#cloud=deniz/%D0%94%D0%97/%D0%98%D0%98/%D0%B7%D0%B0%D0%B4%D0%B0%D1%87%D0%B8", url);
+  }
+
+  // --- 7. В чужом списке заводить документы нечем ----------------------------
+  {
+    const api = makeApi({
+      "GET /api/me": () => ({ status: 200, body: { user: { username: "deniz", is_admin: true } } }),
+      "GET /api/docs/vasilisa": () => ({ status: 200, body: { docs: [] } }),
+    });
+    const { $ } = await boot({ path: "/vasilisa", api });
+    ok("в чужом списке формы создания нет", $("new-doc-form").hidden === true);
+  }
+}
+
+// Итог печатаем после main: внутри всё асинхронное, и выход по process.exit
+// из синхронного хвоста убивал прогон раньше первой проверки.
+main().then(() => {
+  console.log(failed ? "\nПРОВАЛОВ: " + failed : "\nвсё чисто");
+  // Код возврата, а не process.exit: выход обрывает ещё не сброшенный stdout,
+  // и при запуске в конвейере вывод терялся целиком.
+  process.exitCode = failed ? 1 : 0;
+});
