@@ -1007,6 +1007,13 @@ el("register-back").addEventListener("click", () => openLogin(""));
 
 el("register-form").addEventListener("submit", async (event) => {
   event.preventDefault();
+  // Согласие — правовое основание обработки (152-ФЗ). Сервер без него
+  // аккаунт не создаст; здесь ловим раньше, чтобы человек не гадал.
+  if (!el("register-consent").checked) {
+    fail({ message: "Поставьте галочку согласия с политикой обработки персональных данных." });
+    el("register-consent").focus();
+    return;
+  }
   status("Создаю аккаунт…");
   try {
     const out = await api("/api/auth/register", {
@@ -1016,6 +1023,7 @@ el("register-form").addEventListener("submit", async (event) => {
         email: el("register-mail").value,
         password: el("register-pass").value,
         invite: state.invite || "",
+        consent: true,
       },
     });
     state.user = out.user;

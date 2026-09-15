@@ -109,8 +109,29 @@ async function main() {
     ok("на новом облаке открыта регистрация, а не вход", !$("register").hidden && $("login").hidden);
     ok("в подсказке сказано, что это первый аккаунт", /первый/i.test($("register-hint").textContent));
 
+    // Галочка согласия: без неё аккаунт не заводится, и это первое, что
+    // проверяет форма — согласие служит правовым основанием обработки.
+    const consent = $("register-consent");
+    ok("в форме есть галочка согласия", Boolean(consent));
+    ok("галочка обязательна", consent && consent.required === true);
+    ok(
+      "ссылка на политику ведёт на denizsincar.ru/privacy",
+      /^https:\/\/denizsincar\.ru\/privacy$/.test($("register-consent-hint").querySelector("a").href),
+      $("register-consent-hint") && $("register-consent-hint").textContent
+    );
+
     $("register-name").value = "deniz";
     $("register-pass").value = "parol1234";
+    submit(w, $("register-form"));
+    await tick();
+    ok(
+      "без согласия форма в API не уходит",
+      !stub.calls.some((c) => c.key === "POST /api/auth/register"),
+      JSON.stringify(stub.calls.map((c) => c.key))
+    );
+    ok("без согласия сказано поставить галочку", /галочк/i.test($("status").textContent), $("status").textContent);
+
+    consent.checked = true;
     submit(w, $("register-form"));
     await tick();
     const call = stub.calls.find((c) => c.key === "POST /api/auth/register");
@@ -120,6 +141,7 @@ async function main() {
       call && call.init.body.includes("deniz") && call.init.body.includes("parol1234") && !call.init.body.includes("invite\":\"K"),
       call && call.init.body
     );
+    ok("согласие уехало в теле регистрации", call && call.init.body.includes('"consent":true'), call && call.init.body);
     ok("после регистрации видно документы", !$("index").hidden && $("register").hidden);
     ok("кнопка учётной записи появилась", $("account-toggle").hidden === false);
     ok("имя владельца на кнопке", /deniz/.test($("account-toggle").textContent), $("account-toggle").textContent);
@@ -137,6 +159,7 @@ async function main() {
     ok("поля для кода в форме нет", !w.document.getElementById("register-invite"));
     $("register-name").value = "vasilisa";
     $("register-pass").value = "parol1234";
+    $("register-consent").checked = true;
     submit(w, $("register-form"));
     await tick();
     const call = stub.calls.find((c) => c.key === "POST /api/auth/register");
@@ -257,6 +280,7 @@ async function main() {
       /ссылк/i.test($("register-hint").textContent), $("register-hint").textContent);
     $("register-name").value = "petya";
     $("register-pass").value = "parol1234";
+    $("register-consent").checked = true;
     submit(w, $("register-form"));
     await tick();
     ok("ошибка сервера видна в статусе", /приглашение не подошло/.test($("status").textContent), $("status").textContent);

@@ -31,6 +31,13 @@ type User struct {
 	IsAdmin      bool      `gorm:"default:false" json:"is_admin"`
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
+
+	// ConsentAt — момент, когда человек принял политику обработки
+	// персональных данных, ConsentPolicy — её редакция. Согласие служит
+	// правовым основанием обработки (152-ФЗ), поэтому его нужно чем-то
+	// подтвердить: время принятия и редакция политики хранятся у аккаунта.
+	ConsentAt     *time.Time `json:"-"`
+	ConsentPolicy string     `gorm:"size:32" json:"-"`
 }
 
 // EmailString — почта строкой (пусто, если её нет).

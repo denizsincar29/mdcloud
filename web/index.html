@@ -48,6 +48,14 @@
       <input id="register-mail" name="email" type="email" autocomplete="email">
       <label for="register-pass">Пароль</label>
       <input id="register-pass" name="password" type="password" autocomplete="new-password" required>
+      <label for="register-consent" class="consent-label">
+        <input id="register-consent" name="consent" type="checkbox" required
+               aria-describedby="register-consent-hint">
+        Согласен с политикой обработки персональных данных
+      </label>
+      <p id="register-consent-hint" class="meta">
+        <a href="https://denizsincar.ru/privacy" target="_blank" rel="noopener noreferrer">Политика обработки персональных данных</a>
+      </p>
       <button type="submit">Создать аккаунт</button>
       <button id="register-back" type="button">Назад ко входу</button>
     </form>

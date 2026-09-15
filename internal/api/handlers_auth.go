@@ -20,6 +20,14 @@ import (
 // незачем — и вредно: разные ответы подсказывали бы, какие коды бывают.
 var errInviteBad = errors.New("приглашение не подошло")
 
+// Политика обработки персональных данных: адрес для человека и редакция,
+// которую он принимает. Согласие — правовое основание обработки (152-ФЗ),
+// поэтому редакция сохраняется у аккаунта вместе со временем принятия.
+const (
+	policyURL      = "https://denizsincar.ru/privacy"
+	policyRevision = "2026-09-15"
+)
+
 // userView — то, что можно показывать наружу. Хеш пароля не покидает сервер.
 type userView struct {
 	ID          uint   `json:"id"`
@@ -54,8 +62,16 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 		Password    string `json:"password"`
 		DisplayName string `json:"display_name"`
 		Invite      string `json:"invite"`
+		Consent     bool   `json:"consent"`
 	}
 	if !decodeJSON(w, r, &in, 4096) {
+		return
+	}
+	// Без согласия аккаунт не заводим: обработка начинается с первого
+	// записанного поля, а подтвердить согласие будет нечем.
+	if !in.Consent {
+		writeErr(w, http.StatusBadRequest,
+			"нужно согласие с политикой обработки персональных данных: "+policyURL)
 		return
 	}
 
@@ -98,11 +114,14 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "не смог захешировать пароль")
 		return
 	}
+	now := time.Now().UTC()
 	u := models.User{
-		Username:     username,
-		PasswordHash: hash,
-		DisplayName:  strings.TrimSpace(in.DisplayName),
-		IsAdmin:      first, // хозяин облака: он выдаёт приглашения
+		Username:      username,
+		PasswordHash:  hash,
+		DisplayName:   strings.TrimSpace(in.DisplayName),
+		IsAdmin:       first, // хозяин облака: он выдаёт приглашения
+		ConsentAt:     &now,
+		ConsentPolicy: policyRevision,
 	}
 	if email != "" {
 		u.Email = &email

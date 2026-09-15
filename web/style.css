@@ -122,6 +122,25 @@ label {
   font-weight: 600;
 }
 
+/* Галочка согласия с политикой: подпись обычным весом и флажок, который
+   не тянет на себя поля ввода из общего правила для input. */
+.consent-label {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  margin-top: 0.35rem;
+  font-weight: 400;
+}
+
+.consent-label input[type="checkbox"] {
+  flex: 0 0 auto;
+  width: 1.2rem;
+  height: 1.2rem;
+  margin: 0.15rem 0 0;
+  padding: 0;
+  accent-color: var(--accent);
+}
+
 input,
 textarea {
   padding: 0.5rem 0.6rem;

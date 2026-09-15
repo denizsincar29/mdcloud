@@ -138,7 +138,7 @@ func cookieOf(t *testing.T, resp *http.Response) string {
 // register заводит пользователя и возвращает его токен.
 func register(t *testing.T, srv *httptest.Server, username, password string) string {
 	t.Helper()
-	st, body := req(t, srv, "POST", "/api/auth/register", "", map[string]any{
+	st, body := req(t, srv, "POST", "/api/auth/register", "", map[string]any{"consent": true,
 		"username": username, "password": password, "display_name": username,
 	})
 	if st != http.StatusCreated {
@@ -457,7 +457,7 @@ func TestFirstUserIsAdmin(t *testing.T) {
 	srv := newTestServerWith(t, func(c *config.Config) { c.AllowRegistration = false })
 
 	st, body := req(t, srv, "POST", "/api/auth/register", "",
-		map[string]any{"username": "deniz", "password": "parol1234"})
+		map[string]any{"consent": true, "username": "deniz", "password": "parol1234"})
 	if st != http.StatusCreated {
 		t.Fatalf("регистрация хозяина: %d %v", st, body)
 	}
@@ -468,7 +468,7 @@ func TestFirstUserIsAdmin(t *testing.T) {
 
 	// Второй без приглашения не проходит: регистрация закрыта.
 	st, _ = req(t, srv, "POST", "/api/auth/register", "",
-		map[string]any{"username": "vasilisa", "password": "parol1234"})
+		map[string]any{"consent": true, "username": "vasilisa", "password": "parol1234"})
 	if st != http.StatusForbidden {
 		t.Errorf("регистрация без приглашения: %d, ждали 403", st)
 	}
@@ -493,7 +493,7 @@ func TestInviteLetsFriendIn(t *testing.T) {
 	}
 
 	st, body := req(t, srv, "POST", "/api/auth/register", "",
-		map[string]any{"username": "vasilisa", "password": "parol1234", "invite": code})
+		map[string]any{"consent": true, "username": "vasilisa", "password": "parol1234", "invite": code})
 	if st != http.StatusCreated {
 		t.Fatalf("регистрация по приглашению: %d %v", st, body)
 	}
@@ -503,7 +503,7 @@ func TestInviteLetsFriendIn(t *testing.T) {
 
 	// Код одноразовый: вторым человеком он уже не воспользуется.
 	st, _ = req(t, srv, "POST", "/api/auth/register", "",
-		map[string]any{"username": "petya", "password": "parol1234", "invite": code})
+		map[string]any{"consent": true, "username": "petya", "password": "parol1234", "invite": code})
 	if st != http.StatusForbidden {
 		t.Errorf("повторное использование кода: %d, ждали 403", st)
 	}
@@ -549,7 +549,7 @@ func TestExpiredInviteIsNoGood(t *testing.T) {
 	code, _ := inv["code"].(string)
 
 	if st, _ := req(t, srv, "POST", "/api/auth/register", "",
-		map[string]any{"username": "vasilisa", "password": "parol1234", "invite": code}); st != http.StatusForbidden {
+		map[string]any{"consent": true, "username": "vasilisa", "password": "parol1234", "invite": code}); st != http.StatusForbidden {
 		t.Errorf("регистрация по просроченному коду: %d, ждали 403", st)
 	}
 	_, list := req(t, srv, "GET", "/api/invites", deniz, nil)
@@ -709,14 +709,19 @@ func TestBearerStillWorks(t *testing.T) {
 func TestRegistrationRules(t *testing.T) {
 	srv := newTestServer(t)
 
-	if st, _ := req(t, srv, "POST", "/api/auth/register", "", map[string]any{"username": "Дениз", "password": "parol1234"}); st != http.StatusBadRequest {
+	if st, _ := req(t, srv, "POST", "/api/auth/register", "", map[string]any{"consent": true, "username": "Дениз", "password": "parol1234"}); st != http.StatusBadRequest {
 		t.Errorf("кириллическое имя: %d, ждали 400", st)
 	}
-	if st, _ := req(t, srv, "POST", "/api/auth/register", "", map[string]any{"username": "deniz", "password": "short"}); st != http.StatusBadRequest {
+	if st, _ := req(t, srv, "POST", "/api/auth/register", "", map[string]any{"consent": true, "username": "deniz", "password": "short"}); st != http.StatusBadRequest {
 		t.Errorf("короткий пароль: %d, ждали 400", st)
 	}
+	// Без согласия с политикой аккаунт не заводится: согласие — правовое
+	// основание обработки, и подтвердить его будет нечем.
+	if st, _ := req(t, srv, "POST", "/api/auth/register", "", map[string]any{"username": "bezgalki", "password": "parol1234"}); st != http.StatusBadRequest {
+		t.Errorf("регистрация без согласия: %d, ждали 400", st)
+	}
 	register(t, srv, "deniz", "parol1234")
-	if st, _ := req(t, srv, "POST", "/api/auth/register", "", map[string]any{"username": "deniz", "password": "parol1234"}); st != http.StatusConflict {
+	if st, _ := req(t, srv, "POST", "/api/auth/register", "", map[string]any{"consent": true, "username": "deniz", "password": "parol1234"}); st != http.StatusConflict {
 		t.Errorf("повтор имени: %d, ждали 409", st)
 	}
 	// Вход по имени и по почте, пароль проверяется.

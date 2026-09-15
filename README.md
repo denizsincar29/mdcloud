@@ -154,7 +154,7 @@ An assistant-readable walkthrough of the whole surface lives at
 
 | Method | Path | Who | What |
 | --- | --- | --- | --- |
-| `POST` | `/api/auth/register` | invited | `{username, password, email?, display_name?, invite?}` → token + cookie |
+| `POST` | `/api/auth/register` | invited | `{username, password, consent: true, email?, display_name?, invite?}` → token + cookie |
 | `POST` | `/api/auth/login` | anyone | `{login, password}` (username or email) → token + cookie |
 | `POST` | `/api/auth/logout` | signed in | drop the session, clear the cookie |
 | `GET` | `/api/me` | signed in | current user and document count |
