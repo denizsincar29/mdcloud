@@ -135,11 +135,27 @@ done
 set -a; . "$ENV_FILE"; set +a
 for _v in "${!ENV_WINS[@]}"; do printf -v "$_v" '%s' "${ENV_WINS[$_v]}"; done
 
+# На повторном запуске в .env лежит только строка подключения, а psql нужны
+# части по отдельности — разбираем DSN. Иначе ALTER ROLE ушёл бы с пустым
+# паролем и сервис перестал бы входить в базу.
+if [[ -z "${DB_PASSWORD:-}" && "${MDCLOUD_DATABASE_URL:-}" == *"://"* ]]; then
+  _rest="${MDCLOUD_DATABASE_URL#*://}"     # user:pass@host:port/db?params
+  _cred="${_rest%%@*}"                     # user:pass
+  _tail="${_rest#*@}"                      # host:port/db?params
+  DB_USER="${_cred%%:*}"
+  DB_PASSWORD="${_cred#*:}"
+  DB_HOST="${_tail%%/*}"
+  DB_PORT="${DB_HOST##*:}"
+  DB_HOST="${DB_HOST%%:*}"
+  DB_NAME="${_tail#*/}"
+  DB_NAME="${DB_NAME%%\?*}"
+fi
 DB_USER="${DB_USER:-mdcloud}"
 DB_NAME="${DB_NAME:-mdcloud}"
 DB_HOST="${DB_HOST:-localhost}"
 DB_PORT="${DB_PORT:-5432}"
 DB_PASSWORD="${DB_PASSWORD:-}"
+[[ -n "$DB_PASSWORD" ]] || die "не вижу пароля роли: положи его в .env строкой подключения"
 # Кавычка в пароле не должна ломать psql-команду.
 DB_PASSWORD_SQL="${DB_PASSWORD//\'/\'\'}"
 [[ -n "${MDCLOUD_DATABASE_URL:-}" ]] || die "в $ENV_FILE нет MDCLOUD_DATABASE_URL"
@@ -189,8 +205,10 @@ echo "    статика:  $STATIC_DEST"
 find_go() {
   if [[ -n "${GO:-}" ]]; then echo "$GO"; return; fi
   local c
-  for c in "$(command -v go 2>/dev/null || true)" /usr/local/go/bin/go \
-           /usr/lib/go-*/bin/go "$HOME/go-root/bin/go"; do
+  # Сначала свой Go из ~/go-root (его ставит этот же деплоер): системный
+  # может оказаться старее и утащить за собой скачивание целого тулчейна.
+  for c in "$HOME/go-root/bin/go" "$(command -v go 2>/dev/null || true)" \
+           /usr/local/go/bin/go /usr/lib/go-*/bin/go; do
     if [[ -n "$c" && -x "$c" ]]; then
       echo "$c"
       return
