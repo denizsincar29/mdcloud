@@ -123,7 +123,18 @@ else
   say "читаю настройки из $ENV_FILE"
 fi
 
+# Что передали в окружении — старше .env. Сохраняем явные значения и
+# возвращаем их после source, чтобы «MDCLOUD_ADDR=… ./deploy.sh» работало.
+# Настройки базы сюда не входят: DSN, пароль и соль живут только в .env,
+# иначе окружение и .env разъедутся, и сервис не подключится к базе.
+declare -A ENV_WINS=()
+for _v in MDCLOUD_ADDR MDCLOUD_BASE_URL MDCLOUD_EDITOR_URL MDCLOUD_ALLOWED_ORIGINS \
+          MDCLOUD_ALLOW_REGISTRATION MDCLOUD_IP_SALT; do
+  [[ -n "${!_v:-}" ]] && ENV_WINS[$_v]="${!_v}"
+done
 set -a; . "$ENV_FILE"; set +a
+for _v in "${!ENV_WINS[@]}"; do printf -v "$_v" '%s' "${ENV_WINS[$_v]}"; done
+
 DB_USER="${DB_USER:-mdcloud}"
 DB_NAME="${DB_NAME:-mdcloud}"
 DB_HOST="${DB_HOST:-localhost}"
@@ -132,6 +143,40 @@ DB_PASSWORD="${DB_PASSWORD:-}"
 # Кавычка в пароле не должна ломать psql-команду.
 DB_PASSWORD_SQL="${DB_PASSWORD//\'/\'\'}"
 [[ -n "${MDCLOUD_DATABASE_URL:-}" ]] || die "в $ENV_FILE нет MDCLOUD_DATABASE_URL"
+
+# Порт может быть занят соседним сервисом — на нашей VPS так съело 8080
+# (ya_music_web). Ищем свободный, начиная с заданного, и запоминаем в .env.
+port_busy() { # 0 — порт держит кто-то чужой; наш собственный процесс не в счёт
+  local port="$1" line
+  line="$(ss -ltn 2>/dev/null | awk -v p=":$port" '$4 ~ p"$"' || true)"
+  [[ -z "$line" ]] && return 1
+  line="$(ss -ltnp 2>/dev/null | awk -v p=":$port" '$4 ~ p"$"' || true)"
+  grep -q "(\"$BIN_NAME\"" <<<"$line" && return 1   # это мы сами, редеплой
+  return 0
+}
+OLD_ADDR="$MDCLOUD_ADDR"
+ADDR_PORT="${MDCLOUD_ADDR##*:}"
+if port_busy "$ADDR_PORT"; then
+  for _ in $(seq 1 20); do
+    ADDR_PORT=$((ADDR_PORT + 1))
+    if ! port_busy "$ADDR_PORT"; then
+      MDCLOUD_ADDR="${MDCLOUD_ADDR%:*}:$ADDR_PORT"
+      warn "порт $OLD_ADDR занят — беру $MDCLOUD_ADDR"
+      if [[ -f "$ENV_FILE" ]]; then
+        sed -i "s|^MDCLOUD_ADDR=.*|MDCLOUD_ADDR=$MDCLOUD_ADDR|" "$ENV_FILE"
+        warn "в $ENV_FILE записан новый порт; reverse_proxy в Caddyfile deploy.sh" \
+             "поправит сам, если сайт уже описан его блоком"
+      fi
+      break
+    fi
+  done
+fi
+
+# systemd читает адрес из .env, поэтому итоговый адрес всегда фиксируем там —
+# иначе переданный через окружение адрес так и остался бы только у нас.
+if [[ -f "$ENV_FILE" ]] && ! grep -qxF "MDCLOUD_ADDR=$MDCLOUD_ADDR" "$ENV_FILE"; then
+  sed -i "s|^MDCLOUD_ADDR=.*|MDCLOUD_ADDR=$MDCLOUD_ADDR|" "$ENV_FILE"
+fi
 
 echo "    каталог:  $APP_DIR"
 echo "    сервис:   $SERVICE_NAME (пользователь $SERVICE_USER)"
@@ -226,6 +271,31 @@ sudo systemctl enable "$SERVICE_NAME" >/dev/null 2>&1 || true
 # перезапуска он остался бы крутиться старым бинарём.
 sudo systemctl restart "$SERVICE_NAME"
 
+# Сайт в Caddyfile уже есть, но порт в .env мог поменяться (его занял соседний
+# сервис) — правим одну строку reverse_proxy внутри НАШЕГО блока, по маркеру.
+sync_caddy_port() {
+  local start end have want
+  start="$(grep -n "^# --- $SERVICE_NAME " "$CADDYFILE" | tail -1 | cut -d: -f1 || true)"
+  if [[ -z "$start" ]]; then
+    warn "маркера блока $SERVICE_NAME в $CADDYFILE нет — порт не правлю"
+    return 0
+  fi
+  end="$(awk -v s="$start" 'NR > s && /^}/ { print NR; exit }' "$CADDYFILE" || true)"
+  [[ -n "$end" ]] || end="$(wc -l < "$CADDYFILE")"
+  have="$(sed -n "${start},${end}p" "$CADDYFILE" | grep -m1 reverse_proxy | tr -d '[:space:]' || true)"
+  want="$(echo "reverse_proxy ${MDCLOUD_ADDR}" | tr -d '[:space:]')"
+  if [[ -z "$have" || "$have" == "$want" ]]; then return 0; fi
+  say "порт разъехался: в Caddyfile '$have', в .env '$want' — правлю"
+  sudo cp -a "$CADDYFILE" "${CADDYFILE}.bak.$(date +%s)"
+  sudo sed -i "${start},${end}s|^\([[:space:]]*\)reverse_proxy .*|\1reverse_proxy ${MDCLOUD_ADDR}|" "$CADDYFILE"
+  if sudo caddy validate --config "$CADDYFILE" >/dev/null 2>&1; then
+    sudo systemctl reload caddy
+  else
+    sudo cp -a "$(ls -t "${CADDYFILE}".bak.* | head -1)" "$CADDYFILE"
+    warn "Caddy не принял правку порта — вернул прежний файл"
+  fi
+}
+
 # ── 5. Статика и Caddy ──────────────────────────────────────────────────────
 if [[ "$WITH_CADDY" == "1" ]]; then
   say "статика в $STATIC_DEST"
@@ -247,6 +317,7 @@ if [[ "$WITH_CADDY" == "1" ]]; then
     warn "$CADDYFILE не найден — Caddy не настраиваю"
   elif grep -qE "^[[:space:]]*${DOMAIN//./\\.}[[:space:]]*\{" "$CADDYFILE"; then
     echo "    сайт $DOMAIN в Caddyfile уже есть — не трогаю"
+    sync_caddy_port
   else
     say "добавляю сайт $DOMAIN в $CADDYFILE"
     sudo cp -a "$CADDYFILE" "${CADDYFILE}.bak.$(date +%s)"
