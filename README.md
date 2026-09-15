@@ -33,15 +33,18 @@ that code for a normal session token. Codes live 90 seconds by default.
 
 ## Install
 
-On a Debian/Ubuntu box with PostgreSQL, Caddy and sudo:
+On a Debian/Ubuntu box with PostgreSQL and Caddy:
 
 ```bash
 git clone https://github.com/denizsincar29/mdcloud.git ~/mdcloud
 cd ~/mdcloud
-sudo ./deploy.sh
+./deploy.sh
 ```
 
-`deploy.sh` is idempotent — run it again for every redeploy. On the first run it
+Run it as your normal user, not as root: the script calls `sudo` itself for the
+steps that need it (postgres, systemd, `/etc/caddy`), and the service runs as
+whoever started the script. `deploy.sh` is idempotent — run it again for every
+redeploy. On the first run it
 
 1. asks for the domain, the mathmd address and the database role/name, and
    writes `.env` (mode 600, generated password and IP salt) — later runs just
@@ -49,9 +52,14 @@ sudo ./deploy.sh
 2. builds the binary (installing Go into `~/go-root` if the server has none);
 3. creates the PostgreSQL role and database through `sudo -u postgres psql`;
 4. installs and starts the `mdcloud` systemd unit;
-5. syncs `web/` to `/var/www/html/mdcloud` and appends the site block to
+5. picks a free port if the configured one is taken, syncs `web/` to
+   `/var/www/html/mdcloud` and appends the site block to
    `/etc/caddy/Caddyfile` — with `caddy validate` first and a rollback if the
    config is rejected.
+
+Settings can be overridden per run: `MDCLOUD_ADDR=127.0.0.1:8092 ./deploy.sh`.
+Database settings (`MDCLOUD_DATABASE_URL`, role, password, IP salt) stay
+`.env`-only on purpose — the deployer and systemd must read the same values.
 
 Useful flags: `--reconfigure` (re-ask the settings), `--no-caddy` (leave the web
 server alone).
@@ -163,6 +171,11 @@ single-use handoff codes, token lifecycle, CORS and path validation.
   mathmd viewer (MathJax formulas, Desmos graphs, frontmatter-driven module
   loading). The handoff to the editor works today — the preview will start
   reusing the editor's render pipeline when mathmd grows a read-only viewer mode.
+- The editor cannot yet list or save cloud documents by itself: opening a doc
+  from mathmd and Ctrl+S straight into the cloud is the next step. The pieces
+  are already there — `POST /api/handoff` hands mathmd a token in the URL
+  fragment, `GET /api/docs` lists your documents, `PUT /api/docs/{owner}/{path}`
+  writes them back.
 - No password reset by email, no admin UI.
 - One process, one rate limiter in memory; a second node would need a shared
   counter.
