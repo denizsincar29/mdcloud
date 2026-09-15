@@ -635,6 +635,9 @@ async function main() {
     click(w, $("comment-line"));
     ok("выбор строки начался с первой строки",
       w.document.activeElement.dataset.line === "1", w.document.activeElement.dataset.line || w.document.activeElement.tagName);
+    ok("во время выбора кнопка предлагает его отменить",
+      /Отменить/.test($("comment-line").textContent) && $("comment-line").getAttribute("aria-pressed") === "true",
+      $("comment-line").textContent);
     key(w, "ArrowDown");
     ok("стрелка вниз ведёт на следующую строку",
       w.document.activeElement.dataset.line === "3", w.document.activeElement.dataset.line || w.document.activeElement.tagName);
@@ -652,6 +655,29 @@ async function main() {
     key(w, "Enter");
     ok("без выделения вставилась простая ссылка на первую строку",
       field.value === "Смотри {line 1}", field.value);
+
+    // Alt+C — цитирование на лету: стоя на строке документа, получаешь ссылку
+    // в комментарии, не ходя за кнопкой.
+    ok("кнопка выбора строки прилеплена к краю экрана, пока комментарии открыты",
+      $("comment-line").classList.contains("pinned"));
+    field.value = "Смотри ";
+    field.setSelectionRange(7, 7);
+    field.dispatchEvent(new w.Event("keyup", { bubbles: true }));
+    $("line-5").focus();
+    key(w, "c", { code: "KeyC", altKey: true });
+    ok("Alt+C процитировал строку, на которой стоял",
+      field.value === "Смотри {line 5}", field.value);
+    ok("после Alt+C человек снова в комментарии", w.document.activeElement === field,
+      w.document.activeElement.tagName);
+    // Не на строке документа — Alt+C начинает выбор стрелками, как кнопка.
+    field.focus();
+    key(w, "c", { code: "KeyC", altKey: true });
+    ok("Alt+C вне документа начал выбор строки",
+      w.document.activeElement.dataset.line === "1", w.document.activeElement.tagName);
+    key(w, "Escape");
+    ok("Escape вернул кнопку в исходный вид",
+      /Указать на строку/.test($("comment-line").textContent) &&
+      $("comment-line").getAttribute("aria-pressed") === "false", $("comment-line").textContent);
 
     $("line-5").focus();
     ok("ушли в документ", w.document.activeElement.id === "line-5", w.document.activeElement.id);

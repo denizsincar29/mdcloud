@@ -344,6 +344,14 @@ function commentRegion() {
   return { start: Math.min(region.start, len), end: Math.min(region.end, len) };
 }
 
+// Кнопка выбора — та же, что включает и выключает: она теперь висит на краю
+// экрана, и нажатие на неё во время ходьбы по строкам читается как «хватит».
+function setPickingButton(on) {
+  const button = el("comment-line");
+  button.textContent = on ? "Отменить выбор строки" : "Указать на строку документа";
+  button.setAttribute("aria-pressed", on ? "true" : "false");
+}
+
 function startPicking() {
   const blocks = docBlocks();
   if (!blocks.length) {
@@ -352,12 +360,22 @@ function startPicking() {
   }
   picker.on = true;
   picker.index = 0;
+  setPickingButton(true);
   blocks[0].focus();
   status("Выбираю строку: стрелки вверх и вниз — по строкам, Enter — вставить ссылку, Escape — отмена.");
 }
 
 function stopPicking() {
   picker.on = false;
+  setPickingButton(false);
+}
+
+// cancelPicking — тот же выход, что по Escape: выбор снят, человек снова в
+// комментарии, где писал.
+function cancelPicking() {
+  stopPicking();
+  commentAnchor().focus();
+  status("Выбор строки отменил.");
 }
 
 function movePick(step) {
@@ -714,6 +732,10 @@ async function loadComments(owner, doc) {
 
   const form = el("comment-form");
   form.hidden = !data.can_comment;
+  // Кнопка выбора строки ездит по краю экрана, пока комментарии открыты:
+  // человек читает документ внизу страницы, и без этого до кнопки пришлось бы
+  // листать обратно, потеряв строку, на которую он хотел сослаться.
+  el("comment-line").classList.toggle("pinned", !form.hidden);
   el("comment-closed").hidden = data.comments_on;
   // Вошедшему подсказывать нечего: подпись берётся из аккаунта, а поле имени
   // ему не показывают. Пояснения — только тем, кто пишет без входа.
@@ -1152,7 +1174,10 @@ for (const type of ["keyup", "click", "select", "input", "focus"]) {
   el("comment-body").addEventListener(type, commentRegion);
 }
 
-el("comment-line").addEventListener("click", startPicking);
+el("comment-line").addEventListener("click", () => {
+  if (picker.on) cancelPicking();
+  else startPicking();
+});
 
 // Enter или клик по блоку вставляет ссылку; вне выбора клик по документу
 // ничего не делает — читать его можно спокойно.
@@ -1187,6 +1212,26 @@ document.addEventListener("keydown", (event) => {
     status("Вернулся к комментарию.");
     return;
   }
+  // Alt+C — процитировать строку, на которой стоишь, не уходя за кнопкой:
+  // человек читает документ, стоит на нужном блоке, нажимает — и ссылка встаёт
+  // в комментарий туда, где он писал, а сам он оказывается в поле. Если фокус
+  // не на строке документа, начинаем выбор стрелками — как кнопкой.
+  // Код клавиши, а не буква: раскладка разная.
+  if (event.altKey && event.code === "KeyC") {
+    const block = document.activeElement && document.activeElement.closest
+      ? document.activeElement.closest(".doc-block")
+      : null;
+    if (block) {
+      event.preventDefault();
+      insertLineRef(Number(block.dataset.line));
+      return;
+    }
+    if (!el("comment-form").hidden) {
+      event.preventDefault();
+      startPicking();
+      return;
+    }
+  }
   if (!picker.on) return;
   const blocks = docBlocks();
   switch (event.key) {
@@ -1209,9 +1254,7 @@ document.addEventListener("keydown", (event) => {
     }
     case "Escape":
       event.preventDefault();
-      stopPicking();
-      commentAnchor().focus();
-      status("Выбор строки отменил.");
+      cancelPicking();
       break;
     default:
       break;

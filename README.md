@@ -40,8 +40,17 @@ never send to a server.
   labelled «строка 5», and `[здесь]{line 5}` uses the bracketed text as its
   label, like a markdown hyperlink. The editor button **Указать на строку
   документа** walks the document blocks with the arrow keys and inserts the
-  reference at the caret — with the selection wrapped, if there is one. `Alt+B`
-  jumps back to the comment anchor you left from (a button or such a link).
+  reference at the caret — with the selection wrapped, if there is one. While
+  comments are open that button rides along the edge of the screen, so it can be
+  reached without scrolling back, and `Alt+C` quotes the line you are standing
+  on outright: the reference lands where you were writing and you are back in
+  the comment box. `Alt+B` jumps back to the comment anchor you left from (a
+  button or such a link).
+- **A chess block draws a board**, not a list of pieces: the grid (8 × 52 px
+  cells) and the piece colours are the page's job, since chessjax itself only
+  brings the pieces and the coordinates. The rules live in `web/style.css` and
+  are kept equal to `mathmd/style.css`, so a board looks the same in the editor
+  and in the cloud.
 - **Registration is by invitation.** The first account is the cloud owner: they
   pass without a code and hand out one-time codes to everyone else.
 - **One markdown — one look.** The preview renders a document exactly like the

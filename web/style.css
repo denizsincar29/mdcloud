@@ -239,3 +239,123 @@ a:focus-visible {
   height: 100%;
   border: 0;
 }
+
+/* --- Шахматные доски (chessjax) ---
+   Тема доски живёт на странице, а не в самом chessjax: он приносит только
+   фигуры (инлайн-SVG, 92% клетки) и координаты, а сетку 8×8 и сторону клетки
+   задаёт тот, кто его позвал. Без этих правил доска рассыпается в столбик —
+   клетка во всю ширину, фигура во всю клетку, — и партия читается перечнем
+   фигур, а не позицией. Те же числа, что в mathmd/style.css: доска должна
+   выглядеть одинаково в редакторе и в облаке. */
+.markdown .chessjax-board {
+  display: grid;
+  grid-template-columns: repeat(8, 52px);
+  background: var(--panel);
+  border: 1px solid var(--border);
+}
+
+.markdown .chessjax-cell {
+  width: 52px;
+  height: 52px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.7rem;
+}
+
+.markdown .chessjax-cell.square-dark { background: #769656; }
+.markdown .chessjax-cell.square-light { background: #eeeed2; }
+
+.markdown .chessjax-cell.piece-w { color: #fff; text-shadow: 0 0 2px #000; }
+.markdown .chessjax-cell.piece-b { color: #000; text-shadow: 0 0 2px #fff; }
+
+.markdown .chessjax-cell.variant-highlight { box-shadow: inset 0 0 0 3px #f59e0b; }
+.markdown .chessjax-cell.analysis-move { box-shadow: inset 0 0 0 3px #3b82f6; }
+
+.markdown .chessjax-summary {
+  color: var(--muted);
+  font-size: 0.9rem;
+  max-width: 560px;
+}
+
+.markdown .chessjax-controls {
+  display: flex;
+  gap: 0.4rem;
+  margin-top: 0.5rem;
+}
+
+.markdown .chessjax-btn { min-width: 44px; }
+
+.markdown .chessjax-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.markdown .chessjax-live {
+  min-height: 1.2em;
+  margin: 0.4rem 0 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.markdown .chessjax-error {
+  color: #ff8a8a;
+  font-size: 0.9rem;
+  border: 1px solid #ff8a8a;
+  border-radius: 6px;
+  padding: 0.5rem 0.7rem;
+}
+
+/* Полноэкранный режим доски (кнопка ⛶): доска растягивается на весь экран,
+   фигуры растут вместе с клеткой. Контент выравниваем по верху — при
+   центрировании переполнение режет и строку с ходом под кнопками. */
+.markdown chessjax-board:fullscreen {
+  background: var(--bg);
+  padding: 1rem;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-start;
+  overflow-y: auto;
+}
+
+.markdown chessjax-board:fullscreen .chessjax-board {
+  width: min(64vh, 92vw);
+  height: min(64vh, 92vw);
+  margin: 0 auto;
+  grid-template-columns: repeat(8, minmax(0, 1fr));
+  grid-auto-rows: minmax(0, 1fr);
+  border-width: 2px;
+}
+
+.markdown chessjax-board:fullscreen .chessjax-cell {
+  width: 100%;
+  height: 100%;
+  font-size: min(5vh, 5vw);
+}
+
+.markdown chessjax-board:fullscreen .chessjax-summary,
+.markdown chessjax-board:fullscreen .chessjax-live,
+.markdown chessjax-board:fullscreen .chessjax-help {
+  max-width: min(86vh, 92vw);
+  margin-left: auto;
+  margin-right: auto;
+  text-align: center;
+  font-size: 1.1rem;
+}
+
+.markdown chessjax-board:fullscreen .chessjax-controls {
+  justify-content: center;
+}
+
+/* Кнопка «Указать на строку документа» ездит по краю экрана: человек читает
+   документ внизу страницы, а форма комментария вышел за кадр — до кнопки
+   пришлось бы листать обратно, теряя строку. Полосу прокрутки она не
+   перекрывает и в потоке формы места не занимает. */
+#comment-line.pinned {
+  position: fixed;
+  right: 1rem;
+  bottom: 1rem;
+  z-index: 20;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+}
