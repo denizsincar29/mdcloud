@@ -36,10 +36,13 @@ func Open(dsn string) (*gorm.DB, error) {
 // Migrate создаёт/дополняет таблицы. Схема маленькая, поэтому AutoMigrate —
 // осознанный выбор: деплой не требует отдельного шага с миграциями.
 func Migrate(db *gorm.DB) error {
-	return db.AutoMigrate(&models.User{}, &models.Doc{}, &models.Comment{}, &models.Session{})
+	return db.AutoMigrate(
+		&models.User{}, &models.Doc{}, &models.Comment{}, &models.Session{}, &models.Invite{})
 }
 
-// PurgeExpired удаляет протухшие сессии и коды перехода.
+// PurgeExpired удаляет протухшие сессии. Приглашения не трогаем: у них
+// срок — это «до какого числа можно воспользоваться», а не «когда забыть»,
+// и список должен помнить, кому что выдали.
 func PurgeExpired(db *gorm.DB) error {
 	return db.Where("expires_at < ?", time.Now()).Delete(&models.Session{}).Error
 }

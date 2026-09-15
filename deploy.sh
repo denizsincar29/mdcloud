@@ -91,12 +91,17 @@ if [[ ! -f "$ENV_FILE" || "$RECONFIGURE" == "1" ]]; then
   ask DB_USER        "роль postgres"                "mdcloud"
   ask DB_NAME        "имя базы"                     "mdcloud"
   ask DB_PASSWORD    "пароль роли (можно оставить пустым — сгенерирую)" ""
-  ask ALLOW_REG      "открыть регистрацию? (y/n)"   "n"
+  ask ALLOW_REG      "регистрация без приглашения? (y/n)" "n"
 
   DB_HOST="${DB_HOST:-localhost}"
   DB_PORT="${DB_PORT:-5432}"
   MDCLOUD_BASE_URL="https://${MDCLOUD_DOMAIN#*://}"
   MDCLOUD_EDITOR_URL="https://${EDITOR_URL#*://}"
+  # Кука входа общая для облака и редактора, поэтому её домен — родительский.
+  COOKIE_DEF="${MDCLOUD_BASE_URL#*://}"
+  COOKIE_DEF="${COOKIE_DEF#*.}"
+  [[ "$COOKIE_DEF" != *.* ]] && COOKIE_DEF=""
+  ask COOKIE_DOMAIN "общий домен куки входа (пусто — только облако)" "$COOKIE_DEF"
   if [[ -z "${DB_PASSWORD:-}" ]]; then
     DB_PASSWORD="$(openssl rand -hex 16)"   # hex: пароль не сломает ни DSN, ни psql
   fi
@@ -111,9 +116,10 @@ MDCLOUD_BASE_URL=$MDCLOUD_BASE_URL
 MDCLOUD_EDITOR_URL=$MDCLOUD_EDITOR_URL
 MDCLOUD_ALLOWED_ORIGINS=$MDCLOUD_BASE_URL,$MDCLOUD_EDITOR_URL
 MDCLOUD_ALLOW_REGISTRATION=$ALLOW_REGISTRATION
+MDCLOUD_COOKIE_DOMAIN=$COOKIE_DOMAIN
 MDCLOUD_IP_SALT=$IP_SALT
 MDCLOUD_SESSION_TTL=720h
-MDCLOUD_HANDOFF_TTL=90s
+MDCLOUD_INVITE_TTL=336h
 MDCLOUD_COMMENT_LIMIT=10
 MDCLOUD_COMMENT_WINDOW=10m
 EOF
@@ -129,7 +135,7 @@ fi
 # иначе окружение и .env разъедутся, и сервис не подключится к базе.
 declare -A ENV_WINS=()
 for _v in MDCLOUD_ADDR MDCLOUD_BASE_URL MDCLOUD_EDITOR_URL MDCLOUD_ALLOWED_ORIGINS \
-          MDCLOUD_ALLOW_REGISTRATION MDCLOUD_IP_SALT; do
+          MDCLOUD_ALLOW_REGISTRATION MDCLOUD_COOKIE_DOMAIN MDCLOUD_IP_SALT; do
   [[ -n "${!_v:-}" ]] && ENV_WINS[$_v]="${!_v}"
 done
 set -a; . "$ENV_FILE"; set +a

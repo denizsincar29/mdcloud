@@ -22,6 +22,12 @@ import (
 // newTestServer поднимает сервис на sqlite в памяти: тесты не требуют
 // ни Postgres, ни сети. Схема та же, что в бою (store.Migrate).
 func newTestServer(t *testing.T) *httptest.Server {
+	return newTestServerWith(t, nil)
+}
+
+// newTestServerWith — тот же сервер, но с правкой настроек: тестам про
+// приглашения нужна закрытая регистрация, тестам про куку — своя.
+func newTestServerWith(t *testing.T, tweak func(*config.Config)) *httptest.Server {
 	t.Helper()
 	name := strings.NewReplacer("/", "_", " ", "_").Replace(t.Name())
 	db, err := gorm.Open(sqlite.Open("file:"+name+"?mode=memory&cache=shared"),
@@ -37,20 +43,31 @@ func newTestServer(t *testing.T) *httptest.Server {
 		EditorURL:         "https://mathmd.example",
 		AllowedOrigins:    []string{"https://mathmd.example"},
 		AllowRegistration: true,
+		CookieName:        "mdcloud_sid",
 		SessionTTL:        time.Hour,
-		HandoffTTL:        time.Minute,
+		InviteTTL:         24 * time.Hour,
 		IPSalt:            "test-salt",
 		CommentLimit:      5,
 		CommentWindow:     time.Minute,
 		MaxDocBytes:       1 << 20,
+	}
+	if tweak != nil {
+		tweak(cfg)
 	}
 	srv := httptest.NewServer(api.New(cfg, db).Handler())
 	t.Cleanup(srv.Close)
 	return srv
 }
 
-// req делает запрос и разбирает ответ как JSON-объект.
-func req(t *testing.T, srv *httptest.Server, method, path, token string, body any) (int, map[string]any) {
+// opts — чем запрос отличается от обычного: токен, кука сессии, источник.
+type opts struct {
+	token  string // Authorization: Bearer
+	cookie string // значение куки сессии
+	origin string // Origin: …
+}
+
+// do делает запрос и разбирает ответ как JSON-объект.
+func do(t *testing.T, srv *httptest.Server, method, path string, body any, o opts) (int, map[string]any, *http.Response) {
 	t.Helper()
 	var rdr *bytes.Reader
 	if body == nil {
@@ -69,8 +86,14 @@ func req(t *testing.T, srv *httptest.Server, method, path, token string, body an
 	if body != nil {
 		r.Header.Set("Content-Type", "application/json")
 	}
-	if token != "" {
-		r.Header.Set("Authorization", "Bearer "+token)
+	if o.token != "" {
+		r.Header.Set("Authorization", "Bearer "+o.token)
+	}
+	if o.cookie != "" {
+		r.AddCookie(&http.Cookie{Name: "mdcloud_sid", Value: o.cookie})
+	}
+	if o.origin != "" {
+		r.Header.Set("Origin", o.origin)
 	}
 	resp, err := http.DefaultClient.Do(r)
 	if err != nil {
@@ -80,7 +103,26 @@ func req(t *testing.T, srv *httptest.Server, method, path, token string, body an
 
 	out := map[string]any{}
 	_ = json.NewDecoder(resp.Body).Decode(&out)
-	return resp.StatusCode, out
+	return resp.StatusCode, out, resp
+}
+
+// req — короткая форма do без куки и источника: так ходят скрипты.
+func req(t *testing.T, srv *httptest.Server, method, path, token string, body any) (int, map[string]any) {
+	t.Helper()
+	st, out, _ := do(t, srv, method, path, body, opts{token: token})
+	return st, out
+}
+
+// cookieOf достаёт значение куки сессии из ответа на вход или регистрацию.
+func cookieOf(t *testing.T, resp *http.Response) string {
+	t.Helper()
+	for _, c := range resp.Cookies() {
+		if c.Name == "mdcloud_sid" && c.Value != "" {
+			return c.Value
+		}
+	}
+	t.Fatalf("в ответе нет куки сессии: %v", resp.Cookies())
+	return ""
 }
 
 // register заводит пользователя и возвращает его токен.
@@ -263,61 +305,258 @@ func TestCommentsOnPrivateDocAreHidden(t *testing.T) {
 	}
 }
 
-func TestHandoffCodeIsSingleUse(t *testing.T) {
-	srv := newTestServer(t)
-	deniz := register(t, srv, "deniz", "parol1234")
-	req(t, srv, "PUT", "/api/docs/deniz/заметка", deniz, map[string]any{"content": "текст"})
+// Первый зарегистрировавшийся — хозяин облака: он проходит без приглашения
+// и получает право выписывать их другим.
+func TestFirstUserIsAdmin(t *testing.T) {
+	srv := newTestServerWith(t, func(c *config.Config) { c.AllowRegistration = false })
 
-	st, h := req(t, srv, "POST", "/api/handoff", deniz, map[string]any{"path": "заметка"})
-	if st != http.StatusOK {
-		t.Fatalf("выдача кода: %d %v", st, h)
+	st, body := req(t, srv, "POST", "/api/auth/register", "",
+		map[string]any{"username": "deniz", "password": "parol1234"})
+	if st != http.StatusCreated {
+		t.Fatalf("регистрация хозяина: %d %v", st, body)
 	}
-	code, _ := h["code"].(string)
-	url, _ := h["url"].(string)
-	if code == "" || !strings.Contains(url, "#cloud=") {
-		t.Fatalf("код или ссылка пустые: %v", h)
-	}
-	// Код уходит во фрагменте: он не должен попадать в серверные логи.
-	if strings.Contains(url, "?code=") || strings.Contains(url, "&code=") {
-		t.Errorf("код обязан быть во фрагменте, а не в строке запроса: %s", url)
+	user, _ := body["user"].(map[string]any)
+	if user["is_admin"] != true {
+		t.Errorf("первый пользователь должен быть админом: %v", user)
 	}
 
-	st, out := req(t, srv, "POST", "/api/handoff/redeem", "", map[string]any{"code": code})
-	if st != http.StatusOK {
-		t.Fatalf("обмен кода: %d %v", st, out)
-	}
-	tok, _ := out["token"].(string)
-	if tok == "" || out["path"] != "заметка" {
-		t.Fatalf("обмен вернул не то: %v", out)
-	}
-	// Токен из обмена — настоящая сессия.
-	if st, me := req(t, srv, "GET", "/api/me", tok, nil); st != http.StatusOK {
-		t.Errorf("токен из обмена не работает: %d %v", st, me)
-	} else if user, _ := me["user"].(map[string]any); user["username"] != "deniz" {
-		t.Errorf("токен выдан не тому: %v", user)
-	}
-
-	// Второй раз тот же код не срабатывает.
-	if st, _ := req(t, srv, "POST", "/api/handoff/redeem", "", map[string]any{"code": code}); st != http.StatusGone {
-		t.Errorf("повторный обмен кода: %d, ждали 410", st)
-	}
-	// И мусорный код тоже.
-	if st, _ := req(t, srv, "POST", "/api/handoff/redeem", "", map[string]any{"code": "нет-такого"}); st != http.StatusGone {
-		t.Errorf("обмен мусорного кода: %d, ждали 410", st)
+	// Второй без приглашения не проходит: регистрация закрыта.
+	st, _ = req(t, srv, "POST", "/api/auth/register", "",
+		map[string]any{"username": "vasilisa", "password": "parol1234"})
+	if st != http.StatusForbidden {
+		t.Errorf("регистрация без приглашения: %d, ждали 403", st)
 	}
 }
 
-func TestHandoffRequiresOwnership(t *testing.T) {
-	srv := newTestServer(t)
+func TestInviteLetsFriendIn(t *testing.T) {
+	srv := newTestServerWith(t, func(c *config.Config) { c.AllowRegistration = false })
+	deniz := register(t, srv, "deniz", "parol1234")
+
+	st, inv := req(t, srv, "POST", "/api/invites", deniz, map[string]any{"note": "Василисе"})
+	if st != http.StatusCreated {
+		t.Fatalf("выдача приглашения: %d %v", st, inv)
+	}
+	code, _ := inv["code"].(string)
+	url, _ := inv["url"].(string)
+	if code == "" || !strings.Contains(url, "#invite=") {
+		t.Fatalf("код или ссылка пустые: %v", inv)
+	}
+	// Код едет во фрагменте: в логах Caddy он осесть не должен.
+	if strings.Contains(url, "?invite=") {
+		t.Errorf("код обязан быть во фрагменте, а не в строке запроса: %s", url)
+	}
+
+	st, body := req(t, srv, "POST", "/api/auth/register", "",
+		map[string]any{"username": "vasilisa", "password": "parol1234", "invite": code})
+	if st != http.StatusCreated {
+		t.Fatalf("регистрация по приглашению: %d %v", st, body)
+	}
+	if user, _ := body["user"].(map[string]any); user["is_admin"] != false {
+		t.Errorf("пришедший по приглашению не должен быть админом: %v", user)
+	}
+
+	// Код одноразовый: вторым человеком он уже не воспользуется.
+	st, _ = req(t, srv, "POST", "/api/auth/register", "",
+		map[string]any{"username": "petya", "password": "parol1234", "invite": code})
+	if st != http.StatusForbidden {
+		t.Errorf("повторное использование кода: %d, ждали 403", st)
+	}
+
+	// В списке видно, что приглашение потрачено и кем.
+	st, list := req(t, srv, "GET", "/api/invites", deniz, nil)
+	if st != http.StatusOK {
+		t.Fatalf("список приглашений: %d %v", st, list)
+	}
+	invites, _ := list["invites"].([]any)
+	if len(invites) != 1 {
+		t.Fatalf("в списке %d приглашений, ждали одно: %v", len(invites), list)
+	}
+	only, _ := invites[0].(map[string]any)
+	if only["state"] != "used" || only["used_by"] != "vasilisa" {
+		t.Errorf("приглашение должно быть потрачено Василисой: %v", only)
+	}
+	// И код в списке не показывается — его в базе нет.
+	if _, ok := only["code"]; ok {
+		t.Error("список не должен отдавать коды: в базе только хеши")
+	}
+
+	// Потраченное приглашение не отзывается: это уже история.
+	id := fmt.Sprintf("%v", only["id"])
+	if st, _ := req(t, srv, "DELETE", "/api/invites/"+id, deniz, nil); st != http.StatusConflict {
+		t.Errorf("отзыв потраченного приглашения: %d, ждали 409", st)
+	}
+}
+
+// Просроченное приглашение — просто бумажка: и по нему не войти, и в списке
+// оно видно как просроченное.
+func TestExpiredInviteIsNoGood(t *testing.T) {
+	srv := newTestServerWith(t, func(c *config.Config) {
+		c.AllowRegistration = false
+		c.InviteTTL = -time.Minute
+	})
+	deniz := register(t, srv, "deniz", "parol1234")
+
+	st, inv := req(t, srv, "POST", "/api/invites", deniz, nil)
+	if st != http.StatusCreated {
+		t.Fatalf("выдача приглашения: %d %v", st, inv)
+	}
+	code, _ := inv["code"].(string)
+
+	if st, _ := req(t, srv, "POST", "/api/auth/register", "",
+		map[string]any{"username": "vasilisa", "password": "parol1234", "invite": code}); st != http.StatusForbidden {
+		t.Errorf("регистрация по просроченному коду: %d, ждали 403", st)
+	}
+	_, list := req(t, srv, "GET", "/api/invites", deniz, nil)
+	invites, _ := list["invites"].([]any)
+	if len(invites) != 1 {
+		t.Fatalf("в списке %d приглашений: %v", len(invites), list)
+	}
+	only, _ := invites[0].(map[string]any)
+	if only["state"] != "expired" {
+		t.Errorf("состояние просроченного приглашения: %v", only["state"])
+	}
+	// Отозвать просроченное можно — им всё равно никто не воспользуется.
+	if st, _ := req(t, srv, "DELETE", fmt.Sprintf("/api/invites/%v", only["id"]), deniz, nil); st != http.StatusOK {
+		t.Errorf("отзыв просроченного приглашения: %d", st)
+	}
+}
+
+// Приглашения — дело хозяина: остальным туда нельзя.
+func TestInvitesAreAdminOnly(t *testing.T) {
+	srv := newTestServer(t) // регистрация открыта: второго заводим свободно
 	deniz := register(t, srv, "deniz", "parol1234")
 	vasya := register(t, srv, "vasilisa", "parol1234")
-	req(t, srv, "PUT", "/api/docs/deniz/заметка", deniz, map[string]any{"content": "текст"})
 
-	if st, _ := req(t, srv, "POST", "/api/handoff", vasya, map[string]any{"path": "заметка"}); st != http.StatusNotFound {
-		t.Errorf("код на чужой документ: %d, ждали 404", st)
+	if st, _ := req(t, srv, "GET", "/api/invites", vasya, nil); st != http.StatusForbidden {
+		t.Errorf("чужой смотрит список приглашений: %d, ждали 403", st)
 	}
-	if st, _ := req(t, srv, "POST", "/api/handoff", "", map[string]any{"path": "заметка"}); st != http.StatusUnauthorized {
-		t.Errorf("код без входа: %d, ждали 401", st)
+	if st, _ := req(t, srv, "POST", "/api/invites", vasya, nil); st != http.StatusForbidden {
+		t.Errorf("чужой выписывает приглашение: %d, ждали 403", st)
+	}
+	if st, _ := req(t, srv, "GET", "/api/invites", "", nil); st != http.StatusUnauthorized {
+		t.Errorf("список приглашений без входа: %d, ждали 401", st)
+	}
+	if st, _ := req(t, srv, "GET", "/api/invites", deniz, nil); st != http.StatusOK {
+		t.Errorf("хозяин смотрит список приглашений: %d", st)
+	}
+}
+
+// Вход кладёт сессию в httpOnly-куку, и дальше браузер ходит ею одной.
+func TestCookieSessionAndCSRF(t *testing.T) {
+	srv := newTestServer(t)
+	register(t, srv, "deniz", "parol1234")
+
+	st, _, resp := do(t, srv, "POST", "/api/auth/login",
+		map[string]any{"login": "deniz", "password": "parol1234"},
+		opts{origin: "https://cloud.example"})
+	if st != http.StatusOK {
+		t.Fatalf("вход: %d", st)
+	}
+	var sc *http.Cookie
+	for _, c := range resp.Cookies() {
+		if c.Name == "mdcloud_sid" {
+			sc = c
+		}
+	}
+	if sc == nil || sc.Value == "" {
+		t.Fatalf("вход не выдал куку сессии: %v", resp.Cookies())
+	}
+	// Флаги куки — не украшение: без них её достанет любой скрипт на странице.
+	if !sc.HttpOnly {
+		t.Error("кука сессии обязана быть HttpOnly")
+	}
+	if sc.SameSite != http.SameSiteLaxMode {
+		t.Errorf("SameSite=Lax, а не %v: иначе кука уедет на чужой сайт", sc.SameSite)
+	}
+	if sc.Path != "/" {
+		t.Errorf("путь куки %q, ждали /", sc.Path)
+	}
+	cookie := sc.Value
+
+	if st, _, _ := do(t, srv, "GET", "/api/me", nil, opts{cookie: cookie}); st != http.StatusOK {
+		t.Errorf("запрос с кукой: %d, ждали 200", st)
+	}
+
+	// Чужой сайт с нашей кукой — отказ: браузер приложил бы её сам.
+	st, _, _ = do(t, srv, "PUT", "/api/docs/deniz/заметка", map[string]any{"content": "чужое"},
+		opts{cookie: cookie, origin: "https://злой.example"})
+	if st != http.StatusForbidden {
+		t.Errorf("запись с чужого сайта: %d, ждали 403", st)
+	}
+	// Запрос с кукой вообще без Origin — тоже отказ: браузер Origin ставит
+	// всегда, а его отсутствие означает самодельный клиент с чужой кукой.
+	st, _, _ = do(t, srv, "PUT", "/api/docs/deniz/заметка", map[string]any{"content": "чужое"},
+		opts{cookie: cookie})
+	if st != http.StatusForbidden {
+		t.Errorf("запись без Origin: %d, ждали 403", st)
+	}
+	// Свой редактор — свой: запись проходит.
+	st, _, _ = do(t, srv, "PUT", "/api/docs/deniz/заметка", map[string]any{"content": "своё"},
+		opts{cookie: cookie, origin: "https://mathmd.example"})
+	if st != http.StatusOK {
+		t.Errorf("запись со своего сайта: %d, ждали 200", st)
+	}
+	// А чтения под CSRF не попадают: их чужой сайт и так не увидит.
+	if st, _, _ := do(t, srv, "GET", "/api/me", nil, opts{cookie: cookie, origin: "https://злой.example"}); st != http.StatusOK {
+		t.Errorf("чтение с чужого Origin: %d, ждали 200", st)
+	}
+
+	// Выход гасит и куку, и сессию.
+	st, _, resp = do(t, srv, "POST", "/api/auth/logout", nil,
+		opts{cookie: cookie, origin: "https://cloud.example"})
+	if st != http.StatusOK {
+		t.Fatalf("выход: %d", st)
+	}
+	cleared := false
+	for _, c := range resp.Cookies() {
+		if c.Name == "mdcloud_sid" && c.Value == "" {
+			cleared = true
+		}
+	}
+	if !cleared {
+		t.Errorf("выход не снял куку: %v", resp.Cookies())
+	}
+	if st, _, _ := do(t, srv, "GET", "/api/me", nil, opts{cookie: cookie}); st != http.StatusUnauthorized {
+		t.Errorf("сессия после выхода: %d, ждали 401", st)
+	}
+}
+
+// Форма с чужого сайта до API не доходит: JSON ей не отправить без
+// разрешения, которого чужому сайту не выдают.
+func TestFormPostRejected(t *testing.T) {
+	srv := newTestServer(t)
+	register(t, srv, "deniz", "parol1234")
+
+	r, err := http.NewRequest(http.MethodPost, srv.URL+"/api/auth/login",
+		strings.NewReader("login=deniz&password=parol1234"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	r.Header.Set("Origin", "https://злой.example")
+	resp, err := http.DefaultClient.Do(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnsupportedMediaType {
+		t.Errorf("форма на вход: %d, ждали 415", resp.StatusCode)
+	}
+	if len(resp.Cookies()) != 0 {
+		t.Errorf("форма получила куку сессии: %v", resp.Cookies())
+	}
+}
+
+// Bearer-токен остаётся рабочим: им ходят скрипты и сам редактор, и CSRF
+// к ним не относится — куки у них нет.
+func TestBearerStillWorks(t *testing.T) {
+	srv := newTestServer(t)
+	tok := register(t, srv, "deniz", "parol1234")
+
+	st, _, _ := do(t, srv, "PUT", "/api/docs/deniz/заметка", map[string]any{"content": "текст"},
+		opts{token: tok})
+	if st != http.StatusOK {
+		t.Errorf("запись с Bearer без Origin: %d, ждали 200", st)
 	}
 }
 
@@ -377,8 +616,10 @@ func TestCORSPreflight(t *testing.T) {
 	if got := resp.Header.Get("Access-Control-Allow-Origin"); got != "https://mathmd.example" {
 		t.Errorf("свой источник не пропущен: %q", got)
 	}
-	if resp.Header.Get("Access-Control-Allow-Credentials") != "" {
-		t.Error("куки между сайтами делиться не должны — Allow-Credentials лишний")
+	// Редактор ходит кукой сессии, поэтому источник отражается точным
+	// значением, а кредам нужно разрешение — со звёздочкой браузер откажет.
+	if resp.Header.Get("Access-Control-Allow-Credentials") != "true" {
+		t.Error("редактору нужен Allow-Credentials: он ходит кукой сессии")
 	}
 
 	r2, _ := http.NewRequest(http.MethodOptions, srv.URL+"/api/docs/deniz", nil)

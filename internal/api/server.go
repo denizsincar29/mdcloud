@@ -38,6 +38,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /api/health", s.health)
+	mux.HandleFunc("GET /api/config", s.publicConfig)
 
 	mux.HandleFunc("POST /api/auth/register", s.register)
 	mux.HandleFunc("POST /api/auth/login", s.login)
@@ -54,15 +55,16 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/comments/{owner}/{path...}", s.postComment)
 	mux.HandleFunc("DELETE /api/comments/{id}", s.requireUser(s.deleteComment))
 
-	mux.HandleFunc("POST /api/handoff", s.requireUser(s.createHandoff))
-	mux.HandleFunc("POST /api/handoff/redeem", s.redeemHandoff)
+	mux.HandleFunc("GET /api/invites", s.requireAdmin(s.listInvites))
+	mux.HandleFunc("POST /api/invites", s.requireAdmin(s.createInvite))
+	mux.HandleFunc("DELETE /api/invites/{id}", s.requireAdmin(s.deleteInvite))
 
 	// Локальная разработка: отдать web/ напрямую, чтобы не поднимать Caddy.
 	if dir := strings.TrimSpace(os.Getenv("MDCLOUD_STATIC_DIR")); dir != "" {
 		mux.Handle("GET /", http.FileServer(http.Dir(dir)))
 	}
 
-	return s.recoverer(s.cors(s.staticHeaders(mux)))
+	return s.recoverer(s.cors(s.csrf(s.staticHeaders(mux))))
 }
 
 // ---------------------------------------------------------------- middleware
@@ -91,18 +93,17 @@ func (s *Server) staticHeaders(next http.Handler) http.Handler {
 }
 
 // cors разрешает обращения к /api только с известных сайтов.
-// Никаких Allow-Credentials: авторизация идёт заголовком Authorization,
-// куки между облаком и редактором не разделяются вообще.
+//
+// Origin отражается точным значением (никаких звёздочек — с ними браузер
+// запрещает отдавать куку), а Allow-Credentials нужен потому, что сессия
+// ездит кукой: редактор и облако — два разных origin одного сайта.
 func (s *Server) cors(next http.Handler) http.Handler {
-	allowed := make(map[string]bool, len(s.cfg.AllowedOrigins))
-	for _, o := range s.cfg.AllowedOrigins {
-		allowed[o] = true
-	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if origin := r.Header.Get("Origin"); origin != "" {
 			w.Header().Add("Vary", "Origin")
-			if allowed[origin] {
+			if s.cfg.OriginAllowed(origin) {
 				w.Header().Set("Access-Control-Allow-Origin", origin)
+				w.Header().Set("Access-Control-Allow-Credentials", "true")
 				w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
 				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 				w.Header().Set("Access-Control-Max-Age", "600")
@@ -116,17 +117,66 @@ func (s *Server) cors(next http.Handler) http.Handler {
 	})
 }
 
+// csrf закрывает то, что открывает кука: браузер шлёт её сам, поэтому
+// чужой сайт мог бы дёрнуть наш API «от имени» пользователя.
+//
+// Правило простое и без токенов в разметке: запрос, который меняет данные
+// и пришёл с кукой сессии, обязан принести Origin нашего сайта. Браузер
+// ставит Origin на все POST/PUT/DELETE — и на свои, и на чужие, — так что
+// подделка из чужой вкладки отсекается здесь, а не в каждом обработчике.
+// Скрипты с Authorization: Bearer под это правило не попадают: куки у них
+// нет, а сам заголовок чужой сайт выставить не может.
+func (s *Server) csrf(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost, http.MethodPut, http.MethodPatch:
+			// Форма с чужого сайта умеет только простые типы содержимого.
+			// JSON она отправить не может: на него браузер сперва спросит
+			// разрешение, а чужому сайту CORS его не даёт. DELETE формы не
+			// умеют вовсе, поэтому его отдельно проверять нечем.
+			ct := r.Header.Get("Content-Type")
+			if r.ContentLength != 0 && !strings.HasPrefix(ct, "application/json") {
+				writeErr(w, http.StatusUnsupportedMediaType,
+					"тело запроса должно быть application/json")
+				return
+			}
+		case http.MethodDelete:
+		default:
+			next.ServeHTTP(w, r)
+			return
+		}
+		// Дальше — только про куку: её браузер прикладывает сам, значит
+		// запрос обязан прийти с нашего сайта.
+		if s.sessionCookie(r) == "" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if !s.cfg.OriginAllowed(r.Header.Get("Origin")) {
+			writeErr(w, http.StatusForbidden,
+				"запрос с чужого сайта отклонён — обновите страницу и попробуйте снова")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // ---------------------------------------------------------------- авторизация
 
-// authenticate ищет сессию по токену из Authorization: Bearer.
+// authenticate ищет сессию — сначала по куке, потом по заголовку
+//
+// Кука — путь браузера: httpOnly, скрипту токен не виден. Bearer — путь
+// скриптов и API-клиентов. Оба ведут в одну таблицу сессий.
 func (s *Server) authenticate(r *http.Request) *models.User {
-	tok := bearerToken(r)
+	tok := s.sessionCookie(r)
+	if tok == "" {
+		tok = bearerToken(r)
+	}
 	if tok == "" {
 		return nil
 	}
 	var sess models.Session
-	err := s.db.Where("token_hash = ? AND kind = ? AND expires_at > ?",
-		auth.HashToken(tok), models.KindSession, time.Now()).First(&sess).Error
+	err := s.db.Where("token_hash = ? AND expires_at > ?",
+		auth.HashToken(tok), time.Now()).First(&sess).Error
 	if err != nil {
 		return nil
 	}
@@ -137,6 +187,48 @@ func (s *Server) authenticate(r *http.Request) *models.User {
 	return &u
 }
 
+// sessionCookie читает куку сессии.
+func (s *Server) sessionCookie(r *http.Request) string {
+	c, err := r.Cookie(s.cfg.CookieName)
+	if err != nil || c.Value == "" {
+		return ""
+	}
+	return c.Value
+}
+
+// setSessionCookie отдаёт браузеру токен входа.
+//
+// HttpOnly — JS токен не прочитает; Secure — только по https; SameSite=Lax
+// — по чужому сайту кука не уедет, а по нашим поддоменам (редактор) уедет,
+// потому что это один сайт. Домен родительский: вход один на оба сайта.
+func (s *Server) setSessionCookie(w http.ResponseWriter, tok string, exp time.Time) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     s.cfg.CookieName,
+		Value:    tok,
+		Path:     "/",
+		Domain:   s.cfg.CookieDomain,
+		Expires:  exp,
+		MaxAge:   int(time.Until(exp).Seconds()),
+		HttpOnly: true,
+		Secure:   s.cfg.CookieSecure,
+		SameSite: http.SameSiteLaxMode,
+	})
+}
+
+// clearSessionCookie убирает куку — при выходе и когда сессия протухла.
+func (s *Server) clearSessionCookie(w http.ResponseWriter) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     s.cfg.CookieName,
+		Value:    "",
+		Path:     "/",
+		Domain:   s.cfg.CookieDomain,
+		MaxAge:   -1,
+		HttpOnly: true,
+		Secure:   s.cfg.CookieSecure,
+		SameSite: http.SameSiteLaxMode,
+	})
+}
+
 type authedHandler func(w http.ResponseWriter, r *http.Request, u *models.User)
 
 // requireUser пускает дальше только с живой сессией.
@@ -144,11 +236,27 @@ func (s *Server) requireUser(next authedHandler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		u := s.authenticate(r)
 		if u == nil {
+			// Кука с протухшей сессией только мешает: браузер будет слать
+			// её в каждый запрос, а вход всё равно нужен заново.
+			if s.sessionCookie(r) != "" {
+				s.clearSessionCookie(w)
+			}
 			writeErr(w, http.StatusUnauthorized, "нужен вход")
 			return
 		}
 		next(w, r, u)
 	}
+}
+
+// requireAdmin пускает только хозяина облака и тех, кого он назначил.
+func (s *Server) requireAdmin(next authedHandler) http.HandlerFunc {
+	return s.requireUser(func(w http.ResponseWriter, r *http.Request, u *models.User) {
+		if !u.IsAdmin {
+			writeErr(w, http.StatusForbidden, "это действие доступно только хозяину облака")
+			return
+		}
+		next(w, r, u)
+	})
 }
 
 func bearerToken(r *http.Request) string {
@@ -168,7 +276,7 @@ func (s *Server) issueSession(userID uint, ttl time.Duration) (string, time.Time
 		return "", time.Time{}, err
 	}
 	exp := time.Now().Add(ttl)
-	sess := models.Session{TokenHash: hash, UserID: userID, Kind: models.KindSession, ExpiresAt: exp}
+	sess := models.Session{TokenHash: hash, UserID: userID, ExpiresAt: exp}
 	if err := s.db.Create(&sess).Error; err != nil {
 		return "", time.Time{}, err
 	}

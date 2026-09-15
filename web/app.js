@@ -1,8 +1,9 @@
 // mdcloud — предпросмотр облачных markdown-документов.
 //
-// Страница только читает. Вся правка живёт в редакторе mathmd: кнопка
-// «Редактировать» берёт одноразовый код и уводит туда браузер. Куки между
-// сайтами не делятся ни в одну сторону — только токен в заголовке.
+// Страница показывает документ и умеет позвать редактор: кнопка
+// «Редактировать» открывает mathmd на этом документе. Сессия живёт в
+// httpOnly-куке на общем домене, поэтому редактору не нужно её получать —
+// он просто ходит в API, и браузер прикладывает куку сам.
 //
 // Разметка документа приходит из облака как обычный markdown, а не как
 // готовый HTML: рендерер здесь один, и он пропускает результат через
@@ -11,10 +12,11 @@
 const API = "";
 
 const state = {
-  token: localStorage.getItem("mdcloud_token") || "",
   user: null,
   doc: null,
   renderers: null,
+  config: null, // что сервер рассказал про регистрацию
+  invites: [],
 };
 
 const el = (id) => document.getElementById(id);
@@ -27,14 +29,15 @@ function fail(err) {
   status(err && err.message ? err.message : String(err));
 }
 
+// api ходит с credentials: сессия — кука, и без неё сервер не узнает, кто
+// пришёл. Токен в ответе остаётся для скриптов, страница им не пользуется.
 async function api(path, opts = {}) {
   const headers = {};
-  const init = { method: opts.method || "GET", headers };
+  const init = { method: opts.method || "GET", headers, credentials: "include" };
   if (opts.body !== undefined) {
     headers["Content-Type"] = "application/json";
     init.body = JSON.stringify(opts.body);
   }
-  if (state.token) headers["Authorization"] = "Bearer " + state.token;
 
   const resp = await fetch(API + path, init);
   const text = await resp.text();
@@ -47,16 +50,11 @@ async function api(path, opts = {}) {
     }
   }
   if (!resp.ok) {
-    if (resp.status === 401 && state.token) setToken("");
-    throw new Error(data.error || "ошибка " + resp.status);
+    const err = new Error(data.error || "ошибка " + resp.status);
+    err.status = resp.status;
+    throw err;
   }
   return data;
-}
-
-function setToken(token) {
-  state.token = token || "";
-  if (token) localStorage.setItem("mdcloud_token", token);
-  else localStorage.removeItem("mdcloud_token");
 }
 
 // ------------------------------------------------------------------ рендерер
@@ -130,12 +128,15 @@ function paintAuth() {
   el("who").textContent = logged ? state.user.username : "";
   el("logout").hidden = !logged;
   el("login-toggle").hidden = logged;
+  el("invites-toggle").hidden = !(logged && state.user.is_admin);
 }
 
 // ------------------------------------------------------------------ экраны
 
+const SCREENS = ["login", "register", "index", "doc", "invites"];
+
 function show(id) {
-  for (const name of ["login", "index", "doc"]) el(name).hidden = name !== id;
+  for (const name of SCREENS) el(name).hidden = name !== id;
 }
 
 // На главной без входа показывать нечего — прячем все экраны.
@@ -143,10 +144,54 @@ function showNothing() {
   show(null);
 }
 
+// registration — что можно рассказать про регистрацию по ответу /api/config:
+// первый (место хозяина свободно), открытая, по приглашению или закрыта.
+function registration() {
+  return (state.config && state.config.registration) || "closed";
+}
+
+function paintRegister() {
+  const mode = registration();
+  const byInvite = mode === "invite" || mode === "first";
+  el("register-invite-row").hidden = !byInvite;
+  el("register-toggle").hidden = mode === "closed";
+  el("register-hint").textContent = {
+    first: "Вы первый — регистрируйтесь, и облако станет вашим: приглашения выдаёте вы.",
+    open: "Регистрация открыта для всех.",
+    invite: "Регистрация по приглашению: вставьте код из ссылки, которую вам прислали.",
+    closed: "Регистрация закрыта. Попросите приглашение у хозяина облака.",
+  }[mode];
+}
+
 async function openLogin(message) {
   show("login");
-  el("status").textContent = message || "";
+  status(message || "");
+  paintRegister();
+  // На первом запуске логиниться некому — сразу к регистрации.
+  if (registration() === "first") {
+    await openRegister("");
+    return;
+  }
   el("login-name").focus();
+}
+
+// openRegister показывает форму регистрации. Код можно принести ссылкой
+// вида mdcloud.denizsincar.ru/#invite=КОД — фрагмент адреса на сервер не
+// уходит, поэтому в логах он не осядет.
+async function openRegister(invite) {
+  show("register");
+  status("");
+  paintRegister();
+  el("register-invite").value = invite || "";
+  if (!state.config) {
+    try {
+      state.config = await api("/api/config");
+      paintRegister();
+    } catch {
+      // без настроек просто покажем форму как есть
+    }
+  }
+  el("register-name").focus();
 }
 
 async function openIndex(owner) {
@@ -262,6 +307,52 @@ async function loadComments(owner, doc) {
   form.dataset.base = base;
 }
 
+// ------------------------------------------------------------------ приглашения
+
+async function openInvites() {
+  show("invites");
+  status("");
+  const data = await api("/api/invites");
+  state.invites = data.invites || [];
+  const list = el("invites-list");
+  list.replaceChildren();
+  for (const inv of state.invites) {
+    const li = document.createElement("li");
+    const name = inv.note ? inv.note : "без пометки";
+    const when = new Date(inv.expires_at).toLocaleDateString("ru-RU");
+    const head = document.createElement("p");
+    head.textContent = inv.state === "used"
+      ? `${name} — использовано: ${inv.used_by || "кто-то"}, ${new Date(inv.used_at).toLocaleDateString("ru-RU")}`
+      : inv.state === "expired"
+        ? `${name} — просрочено ${when}`
+        : `${name} — действует до ${when}`;
+    li.append(head);
+    if (inv.state !== "used") {
+      const del = document.createElement("button");
+      del.type = "button";
+      del.textContent = `Отозвать приглашение ${name}`;
+      del.addEventListener("click", async () => {
+        try {
+          await api("/api/invites/" + inv.id, { method: "DELETE" });
+          await openInvites();
+          status("Приглашение отозвано.");
+        } catch (err) {
+          fail(err);
+        }
+      });
+      li.append(del);
+    }
+    list.append(li);
+  }
+  if (!state.invites.length) {
+    const li = document.createElement("li");
+    li.className = "meta";
+    li.textContent = "Приглашений пока нет.";
+    list.append(li);
+  }
+  el("main").focus();
+}
+
 // ------------------------------------------------------------------ маршрут
 
 function route() {
@@ -275,12 +366,13 @@ async function render() {
   status("");
   const r = route();
   try {
+    if (location.hash === "#invites" && state.user && state.user.is_admin) {
+      await openInvites();
+      return;
+    }
     if (r.kind === "home") {
-      if (state.token) {
-        const me = await api("/api/me");
-        state.user = me.user;
-        paintAuth();
-        await openIndex(me.user.username);
+      if (state.user) {
+        await openIndex(state.user.username);
       } else {
         showNothing();
         status("Укажите адрес документа: /имя/папка/файл. Или войдите в шапке страницы.");
@@ -294,24 +386,25 @@ async function render() {
     await openDoc(r.owner, r.path);
   } catch (err) {
     fail(err);
-    if (err.message && err.message.includes("нужен вход")) await openLogin(err.message);
+    if (err.status === 401) await openLogin(err.message);
   }
 }
 
 // ------------------------------------------------------------------ события
 
 el("login-toggle").addEventListener("click", () => openLogin(""));
+el("invites-toggle").addEventListener("click", () => {
+  location.hash = "#invites";
+  render();
+});
 el("logout").addEventListener("click", async () => {
   try {
     await api("/api/auth/logout", { method: "POST" });
   } catch {
-    // токен всё равно стираем — выйти должно получиться всегда
+    // выйти должно получиться всегда, даже если сервер не ответил
   }
-  setToken("");
   state.user = null;
   paintAuth();
-  status("Вы вышли.");
-  el("login").hidden = true;
   location.href = "/";
 });
 
@@ -323,10 +416,38 @@ el("login-form").addEventListener("submit", async (event) => {
       method: "POST",
       body: { login: el("login-name").value, password: el("login-pass").value },
     });
-    setToken(out.token);
     state.user = out.user;
     paintAuth();
     el("login-pass").value = "";
+    // Токен из ответа показывает, что выдача сработала, но страница живёт
+    // кукой — в разметке и в памяти его держать незачем.
+    await render();
+  } catch (err) {
+    fail(err);
+  }
+});
+
+el("register-toggle").addEventListener("click", () => openRegister(""));
+el("register-back").addEventListener("click", () => openLogin(""));
+
+el("register-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  status("Создаю аккаунт…");
+  try {
+    const out = await api("/api/auth/register", {
+      method: "POST",
+      body: {
+        username: el("register-name").value,
+        email: el("register-mail").value,
+        password: el("register-pass").value,
+        invite: el("register-invite").value.trim(),
+      },
+    });
+    state.user = out.user;
+    paintAuth();
+    el("register-pass").value = "";
+    // Код во фрагменте больше не нужен — убираем из адреса.
+    if (location.hash.startsWith("#invite=")) history.replaceState(null, "", "/");
     status("Здравствуйте, " + out.user.username + ".");
     await render();
   } catch (err) {
@@ -334,15 +455,43 @@ el("login-form").addEventListener("submit", async (event) => {
   }
 });
 
-el("edit").addEventListener("click", async () => {
-  status("Готовлю переход в редактор…");
+el("invite-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  status("Выписываю приглашение…");
   try {
-    const out = await api("/api/handoff", { method: "POST", body: { path: state.doc.path } });
-    // Код едет во фрагменте: на сервер он не попадёт.
-    location.href = out.url;
+    const out = await api("/api/invites", {
+      method: "POST",
+      body: { note: el("invite-note").value, days: Number(el("invite-days").value) || 0 },
+    });
+    el("invite-note").value = "";
+    await openInvites();
+    // Ссылка показывается один раз: в базе лежит только хеш кода.
+    el("invite-fresh").hidden = false;
+    el("invite-link").value = out.url;
+    status("Ссылка готова — скопируйте её сейчас: потом показать не получится.");
+    el("invite-link").focus();
+    el("invite-link").select();
   } catch (err) {
     fail(err);
   }
+});
+
+el("invites-back").addEventListener("click", () => {
+  location.hash = "";
+  render();
+});
+
+// «Редактировать» уводит в mathmd на этом документе. Путь едет во фрагменте
+// адреса: редактор читает его и сам идёт в API — с той же кукой, что уже
+// есть у браузера.
+el("edit").addEventListener("click", () => {
+  const base = (state.config && state.config.editor) || "";
+  if (!base) {
+    status("Не знаю адрес редактора — обновите страницу.");
+    return;
+  }
+  const loc = state.doc.owner + "/" + state.doc.path;
+  location.href = base + "/#cloud=" + loc.split("/").map(encodeURIComponent).join("/");
 });
 
 el("toggle-vis").addEventListener("click", async () => {
@@ -382,14 +531,26 @@ el("comment-form").addEventListener("submit", async (event) => {
 // ------------------------------------------------------------------ старт
 
 (async function start() {
-  if (state.token) {
-    try {
-      const me = await api("/api/me");
-      state.user = me.user;
-    } catch {
-      setToken("");
-    }
+  // Кто пришёл — знает только сервер: сессия в куке, из JS её не видно.
+  try {
+    const me = await api("/api/me");
+    state.user = me.user;
+  } catch {
+    state.user = null;
+  }
+  try {
+    state.config = await api("/api/config");
+  } catch {
+    // без настроек страница всё равно работает: покажем то, что есть
   }
   paintAuth();
+
+  // Ссылка-приглашение: код едет во фрагменте, поэтому сразу открываем
+  // регистрацию с уже подставленным кодом.
+  const hash = location.hash.slice(1);
+  if (location.pathname === "/" && hash.startsWith("invite=")) {
+    await openRegister(decodeURIComponent(hash.slice("invite=".length)));
+    return;
+  }
   await render();
 })();

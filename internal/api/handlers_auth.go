@@ -1,15 +1,24 @@
 package api
 
 import (
+	"errors"
 	"log"
 	"net/http"
 	"strings"
 	"time"
 
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
+
 	"github.com/denizsincar29/mdcloud/internal/auth"
 	"github.com/denizsincar29/mdcloud/internal/mdpath"
 	"github.com/denizsincar29/mdcloud/internal/models"
 )
+
+// errInviteBad — приглашение не подошло: чужое, просроченное или уже
+// использованное. Разбираться, какое именно, тому, кто регистрируется,
+// незачем — и вредно: разные ответы подсказывали бы, какие коды бывают.
+var errInviteBad = errors.New("приглашение не подошло")
 
 // userView — то, что можно показывать наружу. Хеш пароля не покидает сервер.
 type userView struct {
@@ -44,6 +53,7 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 		Email       string `json:"email"`
 		Password    string `json:"password"`
 		DisplayName string `json:"display_name"`
+		Invite      string `json:"invite"`
 	}
 	if !decodeJSON(w, r, &in, 4096) {
 		return
@@ -70,12 +80,14 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "база недоступна")
 		return
 	}
-	// Первый пользователь проходит всегда: он и есть хозяин облака.
-	if !s.cfg.AllowRegistration && count > 0 {
-		writeErr(w, http.StatusForbidden, "регистрация закрыта")
+	// Первый пользователь проходит всегда — он и есть хозяин облака, ему
+	// приглашение выдать некому.
+	first := count == 0
+	code := strings.TrimSpace(in.Invite)
+	if !first && !s.cfg.AllowRegistration && code == "" {
+		writeErr(w, http.StatusForbidden, "регистрация по приглашению: нужен код")
 		return
 	}
-
 	if s.userExists(username, email) {
 		writeErr(w, http.StatusConflict, "такое имя или почта уже заняты")
 		return
@@ -90,13 +102,23 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 		Username:     username,
 		PasswordHash: hash,
 		DisplayName:  strings.TrimSpace(in.DisplayName),
+		IsAdmin:      first, // хозяин облака: он выдаёт приглашения
 	}
 	if email != "" {
 		u.Email = &email
 	}
-	if err := s.db.Create(&u).Error; err != nil {
-		log.Printf("создание пользователя %s: %v", username, err)
-		writeErr(w, http.StatusInternalServerError, "не смог создать пользователя")
+
+	if err := s.createUser(&u, code, first); err != nil {
+		switch {
+		case errors.Is(err, errInviteBad):
+			writeErr(w, http.StatusForbidden,
+				"приглашение не подошло: оно использовано, просрочено или выписано не здесь")
+		case isDuplicate(err):
+			writeErr(w, http.StatusConflict, "такое имя или почта уже заняты")
+		default:
+			log.Printf("создание пользователя %s: %v", username, err)
+			writeErr(w, http.StatusInternalServerError, "не смог создать пользователя")
+		}
 		return
 	}
 
@@ -105,10 +127,87 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "не смог выдать токен")
 		return
 	}
+	s.setSessionCookie(w, tok, exp)
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"token":      tok,
 		"expires_at": exp,
 		"user":       viewUser(&u),
+	})
+}
+
+// createUser заводит пользователя, а вместе с ним сжигает приглашение —
+// одной транзакцией.
+//
+// Порядок важен: сначала проверяем и запираем приглашение, потом создаём
+// пользователя. Если создание не сложилось (занятое имя, обрыв базы),
+// транзакция откатится и код останется рабочим — человек попробует снова,
+// а не пойдёт просить новое приглашение.
+func (s *Server) createUser(u *models.User, code string, first bool) error {
+	if first || code == "" {
+		return s.db.Create(u).Error
+	}
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		var inv models.Invite
+		err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("code_hash = ? AND used_at IS NULL AND expires_at > ?",
+				auth.HashToken(code), time.Now()).
+			First(&inv).Error
+		if err != nil {
+			return errInviteBad
+		}
+		if err := tx.Create(u).Error; err != nil {
+			return err
+		}
+		now := time.Now()
+		res := tx.Model(&models.Invite{}).
+			Where("id = ? AND used_at IS NULL", inv.ID).
+			Updates(map[string]any{"used_by": u.ID, "used_at": now})
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected != 1 {
+			return errInviteBad
+		}
+		return nil
+	})
+}
+
+// isDuplicate отличает «имя занято» от «база упала»: драйверы сообщают о
+// нарушении уникальности разными словами, а внятный ответ человеку нужен.
+func isDuplicate(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "unique") || strings.Contains(msg, "duplicate key")
+}
+
+// publicConfig — то, что странице входа нужно знать до входа: можно ли
+// регистрироваться и нужен ли для этого код.
+func (s *Server) publicConfig(w http.ResponseWriter, r *http.Request) {
+	var users, invites int64
+	if err := s.db.Model(&models.User{}).Count(&users).Error; err != nil {
+		writeErr(w, http.StatusInternalServerError, "база недоступна")
+		return
+	}
+	if err := s.db.Model(&models.Invite{}).
+		Where("used_at IS NULL AND expires_at > ?", time.Now()).Count(&invites).Error; err != nil {
+		writeErr(w, http.StatusInternalServerError, "база недоступна")
+		return
+	}
+	mode := "closed"
+	switch {
+	case users == 0:
+		mode = "first" // место хозяина свободно
+	case s.cfg.AllowRegistration:
+		mode = "open"
+	case invites > 0:
+		mode = "invite"
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"registration": mode,
+		"cloud":        s.cfg.BaseURL,
+		"editor":       s.cfg.EditorURL,
 	})
 }
 
@@ -141,6 +240,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "не смог выдать токен")
 		return
 	}
+	s.setSessionCookie(w, tok, exp)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"token":      tok,
 		"expires_at": exp,
@@ -148,11 +248,18 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// logout гасит сессию, которой пришёл запрос: и куку, и строку в базе.
+// Куку снимаем всегда, даже если токена в базе уже нет — иначе она будет
+// висеть в браузере и путать следующий вход.
 func (s *Server) logout(w http.ResponseWriter, r *http.Request, u *models.User) {
-	if tok := bearerToken(r); tok != "" {
-		s.db.Where("token_hash = ? AND kind = ?", auth.HashToken(tok), models.KindSession).
-			Delete(&models.Session{})
+	tok := s.sessionCookie(r)
+	if tok == "" {
+		tok = bearerToken(r)
 	}
+	if tok != "" {
+		s.db.Where("token_hash = ?", auth.HashToken(tok)).Delete(&models.Session{})
+	}
+	s.clearSessionCookie(w)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 

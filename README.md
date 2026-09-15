@@ -2,31 +2,33 @@
 
 A small server that keeps markdown documents at `mdcloud.example/<username>/<subfolder>/<file>`,
 shows them as clean read-only pages, collects comments (anonymous or logged in),
-and hands you off to the mathmd editor when you want to change something.
+and opens the mathmd editor on a document when you want to change it.
 
 ```mermaid
 sequenceDiagram
     participant B as Browser
     participant C as mdcloud
     participant E as mathmd
+    B->>C: POST /api/auth/login → Set-Cookie: mdcloud_sid (Domain=.example)
     B->>C: GET /deniz/ДЗ/ИИ (preview)
-    B->>C: POST /api/handoff (Bearer token)
-    C-->>B: {code, url: mathmd/#cloud=CODE}
-    B->>E: opens editor, reads the code from the fragment
-    E->>C: POST /api/handoff/redeem {code}
-    C-->>E: {token, owner, path} — code is burned
-    E->>C: PUT /api/docs/deniz/ДЗ/ИИ (Bearer token)
+    B->>E: opens mathmd/#cloud=deniz/ДЗ/ИИ
+    E->>C: GET /api/docs/deniz/ДЗ/ИИ (cookie rides along)
+    E->>C: PUT /api/docs/deniz/ДЗ/ИИ (Ctrl+S in the editor)
 ```
 
-The two sites never share a cookie. mdcloud issues a **single-use code**, puts it
-in the URL *fragment* (which browsers never send to a server), and mathmd trades
-that code for a normal session token. Codes live 90 seconds by default.
+Both sites live under one registrable domain, so the session is a single
+**httpOnly cookie** (`Secure`, `SameSite=Lax`) that the browser sends to the
+cloud and to the editor alike: log in once, edit anywhere. The path of the
+document to open travels in the URL *fragment* (`#cloud=…`), which browsers
+never send to a server.
 
 - **Stack:** Go (stdlib `net/http`), GORM, PostgreSQL. One binary, no CGO.
 - **Documents** are rows in the database (`owner_id` + `path`), so moving,
   backing up or re-permissioning is an `UPDATE`, not a file shuffle.
 - **Visibility** is per document: `public` or `private`, private is the default.
 - **Comments** can be anonymous (with a name you type) or from a logged-in user.
+- **Registration is by invitation.** The first account is the cloud owner: they
+  pass without a code and hand out one-time codes to everyone else.
 - **Markdown is never executed as HTML.** The API returns markdown text; the
   preview renders it through showdown + DOMPurify with an allowlist, and the
   page runs under a CSP that has no `unsafe-inline` and no `unsafe-eval`.
@@ -46,9 +48,9 @@ steps that need it (postgres, systemd, `/etc/caddy`), and the service runs as
 whoever started the script. `deploy.sh` is idempotent — run it again for every
 redeploy. On the first run it
 
-1. asks for the domain, the mathmd address and the database role/name, and
-   writes `.env` (mode 600, generated password and IP salt) — later runs just
-   read it;
+1. asks for the domain, the mathmd address, the shared cookie domain and the
+   database role/name, and writes `.env` (mode 600, generated password and IP
+   salt) — later runs just read it;
 2. builds the binary (installing Go into `~/go-root` if the server has none);
 3. creates the PostgreSQL role and database through `sudo -u postgres psql`;
 4. installs and starts the `mdcloud` systemd unit;
@@ -72,6 +74,7 @@ MDCLOUD_DATABASE_URL='postgres://user:pass@localhost:5432/mdcloud?sslmode=disabl
 MDCLOUD_IP_SALT="$(openssl rand -hex 24)" \
 MDCLOUD_BASE_URL=https://mdcloud.example \
 MDCLOUD_EDITOR_URL=https://mathmd.example \
+MDCLOUD_COOKIE_DOMAIN=example \
 MDCLOUD_ALLOWED_ORIGINS=https://mdcloud.example,https://mathmd.example \
 ./mdcloud
 ```
@@ -88,25 +91,34 @@ is in `deploy/Caddyfile.snippet`.
 | `MDCLOUD_DATABASE_URL` | — (required) | PostgreSQL DSN (`DATABASE_URL` also works) |
 | `MDCLOUD_IP_SALT` | — (required) | salt for hashing commenter IPs |
 | `MDCLOUD_BASE_URL` | `http://` + addr | public URL of the cloud |
-| `MDCLOUD_EDITOR_URL` | `https://mathmd.denizsincar.ru` | where the edit button sends you |
-| `MDCLOUD_ALLOWED_ORIGINS` | empty | CORS allowlist, comma separated |
-| `MDCLOUD_ALLOW_REGISTRATION` | `true` | `false` closes signup after the first user |
-| `MDCLOUD_SESSION_TTL` | `720h` | session token lifetime |
-| `MDCLOUD_HANDOFF_TTL` | `90s` | handoff code lifetime |
+| `MDCLOUD_EDITOR_URL` | `https://mathmd.denizsincar.ru` | where «Редактировать» sends you |
+| `MDCLOUD_COOKIE_DOMAIN` | empty | cookie domain; set it to the parent domain to share the login with the editor |
+| `MDCLOUD_COOKIE_NAME` | `mdcloud_sid` | session cookie name |
+| `MDCLOUD_ALLOWED_ORIGINS` | empty | extra CORS origins (cloud and editor origins are always allowed) |
+| `MDCLOUD_ALLOW_REGISTRATION` | `false` | `true` opens registration to everyone without an invite |
+| `MDCLOUD_SESSION_TTL` | `720h` | session lifetime |
+| `MDCLOUD_INVITE_TTL` | `336h` | default invite lifetime (14 days) |
 | `MDCLOUD_COMMENT_LIMIT` / `MDCLOUD_COMMENT_WINDOW` | `10` / `10m` | per-IP comment rate limit |
 | `MDCLOUD_MAX_DOC_BYTES` | `2097152` | document size cap |
 | `MDCLOUD_STATIC_DIR` | unset | serve this directory at `/` (development only) |
 
+The `Secure` flag on the cookie follows `MDCLOUD_BASE_URL`: https → `Secure`,
+so a plain-http development setup still works.
+
 ## API
 
-Auth is `Authorization: Bearer <token>`; there are no cookies anywhere.
+Browser sessions ride in a cookie; scripts may use `Authorization: Bearer <token>`
+(the token from `login`/`register`) instead — both reach the same session table.
+State-changing requests authenticated by cookie must carry an allowed `Origin`
+and a JSON body (see *Security notes*).
 
 | Method | Path | Who | What |
 | --- | --- | --- | --- |
-| `POST` | `/api/auth/register` | anyone | `{username, password, email?, display_name?}` → token |
-| `POST` | `/api/auth/login` | anyone | `{login, password}` (username or email) → token |
-| `POST` | `/api/auth/logout` | signed in | drop the current token |
+| `POST` | `/api/auth/register` | invited | `{username, password, email?, display_name?, invite?}` → token + cookie |
+| `POST` | `/api/auth/login` | anyone | `{login, password}` (username or email) → token + cookie |
+| `POST` | `/api/auth/logout` | signed in | drop the session, clear the cookie |
 | `GET` | `/api/me` | signed in | current user and document count |
+| `GET` | `/api/config` | anyone | registration mode (`first`/`open`/`invite`/`closed`), cloud and editor URLs |
 | `GET` | `/api/docs` | signed in | all of your documents, private included |
 | `GET` | `/api/docs/{owner}` | anyone | that user's public documents |
 | `GET` | `/api/docs/{owner}/{path...}` | anyone | one document with its markdown |
@@ -115,19 +127,37 @@ Auth is `Authorization: Bearer <token>`; there are no cookies anywhere.
 | `GET` | `/api/comments/{owner}/{path...}` | anyone | comments (private docs excluded) |
 | `POST` | `/api/comments/{owner}/{path...}` | anyone | `{body, name?}` — name is required when anonymous |
 | `DELETE` | `/api/comments/{id}` | author or doc owner | delete a comment |
-| `POST` | `/api/handoff` | signed in | `{path}` → `{code, url, expires_at}` |
-| `POST` | `/api/handoff/redeem` | anyone with a code | `{code}` → `{token, owner, path}` |
+| `GET` | `/api/invites` | admin | issued invites and their state (codes are never returned) |
+| `POST` | `/api/invites` | admin | `{note?, days?}` → `{code, url}` — shown once |
+| `DELETE` | `/api/invites/{id}` | admin | revoke an unspent invite |
 | `GET` | `/api/health` | anyone | liveness |
 
 Paths are normalised: no leading slash, no `.`/`..` segments, at most 5 nested
 folders, letters/digits/`.`/`-`/`_`/`+`/`()` in a segment.
 
+## Invites
+
+The first registered account is the owner (`is_admin`) and needs no code. Every
+account after that needs an invite — a 16-byte code, stored only as a SHA-256
+hash, so the link is shown exactly once, when it is created, and a database dump
+hands nobody a way in. A code is spent in the same transaction that creates the
+account, so two people cannot use one code and a failed signup does not burn it.
+
+`POST /api/invites` returns `https://<cloud>/#invite=<code>`; the code lives in
+the URL fragment and never reaches the server or its logs.
+
 ## Security notes
 
-- Session tokens and handoff codes are stored as SHA-256 hashes; a database dump
-  does not hand anybody a login.
-- Handoff codes are burned by a transactional read-and-delete, so two parallel
-  requests cannot both spend one code.
+- Session tokens and invite codes are stored as SHA-256 hashes.
+- The session cookie is `HttpOnly` (unreachable from JavaScript) and
+  `SameSite=Lax`. A shared parent-domain cookie is visible to every subdomain
+  you run — that is the price of one login for both sites, and it is worth it
+  only when the whole parent domain is yours.
+- CSRF: the browser attaches the cookie on its own, so state-changing requests
+  that arrive with a cookie must carry an allowed `Origin`; requests without a
+  cookie (scripts, `Bearer`) are not affected. HTML forms cannot send
+  `application/json` cross-origin without a preflight, and our CORS reflects
+  only allowlisted origins — so form-based CSRF never reaches a handler.
 - Commenter IPs are stored only as `sha256(salt + ip)` and are used solely for
   rate limiting.
 - Markdown from the database is sanitised on the client with an allowlist.
@@ -145,12 +175,12 @@ folders, letters/digits/`.`/`-`/`_`/`+`/`()` in a segment.
 ```
 main.go                 wiring, startup, graceful shutdown
 internal/config         environment
-internal/models         users, docs, comments, sessions
+internal/models         users, docs, comments, sessions, invites
 internal/store          Postgres connection, AutoMigrate
-internal/auth           bcrypt, tokens, one-time codes
+internal/auth           bcrypt, tokens, invite codes
 internal/mdpath         document path rules
 internal/api            routes and handlers
-web/                    read-only preview (static, served by Caddy)
+web/                    preview, login, registration, invites (static, served by Caddy)
 deploy.sh               build + database + systemd + Caddy, idempotent
 deploy/Caddyfile.snippet
 ```
@@ -163,20 +193,17 @@ go test ./...
 
 Tests run against an in-memory SQLite database, so they need neither Postgres
 nor the network. They cover document visibility, ownership, comment rules,
-single-use handoff codes, token lifecycle, CORS and path validation.
+first-user/admin rules, invite redemption and expiry, cookie flags, CSRF and
+CORS, token lifecycle and path validation.
 
 ## Not done yet
 
 - The preview renders markdown in the browser; it does not yet reproduce the
   mathmd viewer (MathJax formulas, Desmos graphs, frontmatter-driven module
-  loading). The handoff to the editor works today — the preview will start
+  loading). The editor opens the document today — the preview will start
   reusing the editor's render pipeline when mathmd grows a read-only viewer mode.
-- The editor cannot yet list or save cloud documents by itself: opening a doc
-  from mathmd and Ctrl+S straight into the cloud is the next step. The pieces
-  are already there — `POST /api/handoff` hands mathmd a token in the URL
-  fragment, `GET /api/docs` lists your documents, `PUT /api/docs/{owner}/{path}`
-  writes them back.
-- No password reset by email, no admin UI.
+- No password reset by email, no admin UI for users (only for invites).
+- Comments are not paginated.
 - One process, one rate limiter in memory; a second node would need a shared
   counter.
 

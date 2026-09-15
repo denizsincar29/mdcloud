@@ -6,6 +6,7 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -19,9 +20,12 @@ type Config struct {
 	BaseURL           string        // публичный адрес облака, https://mdcloud.example
 	EditorURL         string        // публичный адрес редактора mathmd
 	AllowedOrigins    []string      // кому разрешён CORS к /api (сайты редактора/облака)
-	AllowRegistration bool          // открыта ли самостоятельная регистрация
+	AllowRegistration bool          // открытая регистрация без приглашения
+	CookieName        string        // имя куки сессии
+	CookieDomain      string        // домен куки: пусто — только этот хост
+	CookieSecure      bool          // слать куку только по https (в бою — да)
 	SessionTTL        time.Duration // срок жизни токена сессии
-	HandoffTTL        time.Duration // срок жизни одноразового кода перехода в редактор
+	InviteTTL         time.Duration // срок жизни приглашения по умолчанию
 	IPSalt            string        // соль для хеша IP: сырые адреса в БД не пишем
 	CommentLimit      int           // сколько комментариев с одного IP за окно
 	CommentWindow     time.Duration // длина окна для CommentLimit
@@ -36,9 +40,11 @@ func Load() (*Config, error) {
 		BaseURL:           env("MDCLOUD_BASE_URL", ""),
 		EditorURL:         env("MDCLOUD_EDITOR_URL", "https://mathmd.denizsincar.ru"),
 		AllowedOrigins:    splitList(env("MDCLOUD_ALLOWED_ORIGINS", "")),
-		AllowRegistration: envBool("MDCLOUD_ALLOW_REGISTRATION", true),
+		AllowRegistration: envBool("MDCLOUD_ALLOW_REGISTRATION", false),
+		CookieName:        env("MDCLOUD_COOKIE_NAME", "mdcloud_sid"),
+		CookieDomain:      strings.TrimPrefix(env("MDCLOUD_COOKIE_DOMAIN", ""), "."),
 		SessionTTL:        envDur("MDCLOUD_SESSION_TTL", 30*24*time.Hour),
-		HandoffTTL:        envDur("MDCLOUD_HANDOFF_TTL", 90*time.Second),
+		InviteTTL:         envDur("MDCLOUD_INVITE_TTL", 14*24*time.Hour),
 		IPSalt:            env("MDCLOUD_IP_SALT", ""),
 		CommentLimit:      envInt("MDCLOUD_COMMENT_LIMIT", 10),
 		CommentWindow:     envDur("MDCLOUD_COMMENT_WINDOW", 10*time.Minute),
@@ -55,7 +61,38 @@ func Load() (*Config, error) {
 	}
 	c.BaseURL = strings.TrimRight(c.BaseURL, "/")
 	c.EditorURL = strings.TrimRight(c.EditorURL, "/")
+	// Флаг Secure — следствие адреса, а не отдельная настройка: по http
+	// браузер такую куку просто не примет, и вход молча сломается.
+	c.CookieSecure = strings.HasPrefix(c.BaseURL, "https://")
 	return c, nil
+}
+
+// originOf достаёт схему и хост из адреса — в таком виде его присылает
+// браузер в заголовке Origin.
+func originOf(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return ""
+	}
+	return u.Scheme + "://" + u.Host
+}
+
+// OriginAllowed сообщает, знаком ли нам этот Origin. Свой собственный сайт
+// и сайт редактора считаются своими всегда — их не нужно перечислять в
+// MDCLOUD_ALLOWED_ORIGINS.
+func (c *Config) OriginAllowed(origin string) bool {
+	if origin == "" {
+		return false
+	}
+	if origin == originOf(c.BaseURL) || origin == originOf(c.EditorURL) {
+		return true
+	}
+	for _, o := range c.AllowedOrigins {
+		if o != "" && o == origin {
+			return true
+		}
+	}
+	return false
 }
 
 func env(key, def string) string {

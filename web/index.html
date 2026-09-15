@@ -12,6 +12,7 @@
   <a class="brand" href="/">mdcloud</a>
   <nav aria-label="Учётная запись">
     <span id="who" class="who" hidden></span>
+    <button id="invites-toggle" type="button" hidden>Приглашения</button>
     <button id="logout" type="button" hidden>Выйти</button>
     <button id="login-toggle" type="button">Войти</button>
   </nav>
@@ -29,6 +30,47 @@
       <input id="login-pass" name="password" type="password" autocomplete="current-password" required>
       <button type="submit">Войти</button>
     </form>
+    <p class="actions">
+      <button id="register-toggle" type="button">Зарегистрироваться</button>
+    </p>
+  </section>
+
+  <section id="register" hidden aria-labelledby="register-h">
+    <h1 id="register-h">Регистрация</h1>
+    <p id="register-hint" class="meta"></p>
+    <form id="register-form">
+      <label for="register-name">Логин</label>
+      <input id="register-name" name="username" autocomplete="username" required>
+      <label for="register-mail">Почта — не обязательно</label>
+      <input id="register-mail" name="email" type="email" autocomplete="email">
+      <label for="register-pass">Пароль</label>
+      <input id="register-pass" name="password" type="password" autocomplete="new-password" required>
+      <p id="register-invite-row" hidden>
+        <label for="register-invite">Код приглашения</label>
+        <input id="register-invite" name="invite" autocomplete="off">
+      </p>
+      <button type="submit">Создать аккаунт</button>
+      <button id="register-back" type="button">Назад ко входу</button>
+    </form>
+  </section>
+
+  <section id="invites" hidden aria-labelledby="invites-h">
+    <h1 id="invites-h">Приглашения</h1>
+    <p class="meta">Приглашение пускает одного человека. Код показывается один раз — в облаке
+      хранится только его отпечаток, и посмотреть ссылку потом не получится.</p>
+    <form id="invite-form">
+      <label for="invite-note">Кому — для памяти</label>
+      <input id="invite-note" name="note" maxlength="120" placeholder="Маше">
+      <label for="invite-days">Сколько дней действует</label>
+      <input id="invite-days" name="days" type="number" min="1" max="365" value="14">
+      <button type="submit">Выписать приглашение</button>
+    </form>
+    <p id="invite-fresh" hidden>
+      <label for="invite-link">Ссылка для друга</label>
+      <input id="invite-link" readonly>
+    </p>
+    <ul id="invites-list" class="doclist"></ul>
+    <p class="actions"><button id="invites-back" type="button">К документам</button></p>
   </section>
 
   <section id="index" hidden aria-labelledby="index-h">

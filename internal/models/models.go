@@ -85,20 +85,34 @@ type Comment struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
-// Kind — тип записи в таблице сессий.
-const (
-	KindSession = "session" // обычный токен входа
-	KindHandoff = "handoff" // одноразовый код перехода облако → редактор
-)
+// Invite — одноразовое приглашение в облако.
+//
+// В базе лежит только хеш кода: посмотреть приглашение в дампе нельзя, а
+// сам код показывается один раз, в момент создания. Отсюда же следует, что
+// «напомнить ссылку» невозможно — можно только выдать новую.
+type Invite struct {
+	ID        uint       `gorm:"primarykey" json:"id"`
+	CodeHash  string     `gorm:"uniqueIndex;size:64;not null" json:"-"`
+	Note      string     `gorm:"size:120" json:"note"` // кому выдали: «Маше»
+	CreatedBy uint       `gorm:"index;not null" json:"created_by"`
+	UsedBy    *uint      `gorm:"index" json:"used_by,omitempty"`
+	UsedAt    *time.Time `json:"used_at,omitempty"`
+	ExpiresAt time.Time  `gorm:"index;not null" json:"expires_at"`
+	CreatedAt time.Time  `json:"created_at"`
+}
 
-// Session — и токены входа, и одноразовые коды перехода: одна таблица,
-// разное время жизни и Kind. В БД лежит только хеш токена: утечка дампа
-// не отдаёт готовые сессии.
+// Spent сообщает, что приглашение уже использовано.
+func (i *Invite) Spent() bool { return i.UsedAt != nil }
+
+// Expired сообщает, что срок приглашения вышел.
+func (i *Invite) Expired(now time.Time) bool { return now.After(i.ExpiresAt) }
+
+// Session — токен входа. В БД лежит только его хеш: утечка дампа не отдаёт
+// готовые сессии. Браузер получает токен httpOnly-кукой, скрипты — обычным
+// заголовком Authorization: Bearer.
 type Session struct {
 	TokenHash string    `gorm:"primaryKey;size:64" json:"-"`
 	UserID    uint      `gorm:"index;not null" json:"user_id"`
-	Kind      string    `gorm:"size:16;not null;default:session" json:"kind"`
-	DocPath   string    `gorm:"size:255" json:"doc_path,omitempty"` // куда вести после redeem
 	ExpiresAt time.Time `gorm:"index;not null" json:"expires_at"`
 	CreatedAt time.Time `json:"created_at"`
 }
