@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mdcloud — облако markdown</title>
+<meta name="description" content="Облако markdown-документов: предпросмотр, комментарии и правка в редакторе mathmd.">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header class="bar">
+  <a class="brand" href="/">mdcloud</a>
+  <nav aria-label="Учётная запись">
+    <span id="who" class="who" hidden></span>
+    <button id="logout" type="button" hidden>Выйти</button>
+    <button id="login-toggle" type="button">Войти</button>
+  </nav>
+</header>
+
+<main id="main" tabindex="-1">
+  <p id="status" class="status" role="status" aria-live="polite"></p>
+
+  <section id="login" hidden aria-labelledby="login-h">
+    <h1 id="login-h">Вход</h1>
+    <form id="login-form">
+      <label for="login-name">Логин или почта</label>
+      <input id="login-name" name="login" autocomplete="username" required>
+      <label for="login-pass">Пароль</label>
+      <input id="login-pass" name="password" type="password" autocomplete="current-password" required>
+      <button type="submit">Войти</button>
+    </form>
+  </section>
+
+  <section id="index" hidden aria-labelledby="index-h">
+    <h1 id="index-h">Документы</h1>
+    <ul id="index-list" class="doclist"></ul>
+  </section>
+
+  <section id="doc" hidden aria-labelledby="doc-title">
+    <h1 id="doc-title"></h1>
+    <p id="doc-meta" class="meta"></p>
+    <p class="actions">
+      <button id="edit" type="button" hidden>Редактировать</button>
+      <button id="toggle-vis" type="button" hidden></button>
+    </p>
+    <article id="doc-body" class="markdown"></article>
+
+    <section id="comments-block" aria-labelledby="comments-h">
+      <h2 id="comments-h">Комментарии</h2>
+      <p id="comments-empty" class="meta" hidden>Пока никто не написал.</p>
+      <ol id="comments" class="comments"></ol>
+
+      <form id="comment-form" hidden>
+        <p id="comment-hint" class="meta"></p>
+        <p id="comment-name-row">
+          <label for="comment-name">Как вас подписать</label>
+          <input id="comment-name" name="name" maxlength="80" autocomplete="name">
+        </p>
+        <label for="comment-body">Комментарий</label>
+        <textarea id="comment-body" name="body" rows="5" required></textarea>
+        <button type="submit">Отправить</button>
+      </form>
+      <p id="comment-closed" class="meta" hidden>Комментарии к этому документу выключены.</p>
+    </section>
+  </section>
+</main>
+
+<script type="module" src="/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,34 @@
+# mdcloud — блок для Caddyfile. deploy.sh добавляет такой блок сам и
+# проверяет конфиг через `caddy validate` перед перезагрузкой.
+#
+# Статика лежит отдельно от репозитория: caddy не имеет доступа в /home/*,
+# поэтому web/ копируется в /var/www/html/mdcloud.
+#
+# Подставь свой домен, адрес редактора и порт сервиса.
+
+mdcloud.example {
+	encode zstd gzip
+
+	header {
+		X-Content-Type-Options nosniff
+		Referrer-Policy no-referrer
+		Strict-Transport-Security "max-age=31536000"
+		# Скрипты только свои и с cdn.jsdelivr.net (showdown, DOMPurify,
+		# chessjax). Ни 'unsafe-inline', ни 'unsafe-eval' — разметка из
+		# документа не может ничего выполнить.
+		Content-Security-Policy "default-src 'self'; script-src 'self' https://cdn.jsdelivr.net; style-src 'self'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+	}
+
+	# API — на сервис, всё остальное — статика предпросмотра.
+	handle /api/* {
+		reverse_proxy 127.0.0.1:8080
+	}
+
+	handle {
+		root * /var/www/html/mdcloud
+		# Адреса документов разбирает браузер: /имя/папка/файл отдаёт ту же
+		# страницу, а не 404.
+		try_files {path} /index.html
+		file_server
+	}
+}
