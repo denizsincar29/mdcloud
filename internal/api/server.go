@@ -39,6 +39,7 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("GET /api/health", s.health)
 	mux.HandleFunc("GET /api/config", s.publicConfig)
+	mux.HandleFunc("GET /api/llm.md", s.llmGuideHandler)
 
 	mux.HandleFunc("POST /api/auth/register", s.register)
 	mux.HandleFunc("POST /api/auth/login", s.login)
@@ -46,10 +47,15 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/me", s.requireUser(s.me))
 
 	mux.HandleFunc("GET /api/docs", s.requireUser(s.listMine))
+	mux.HandleFunc("POST /api/docs", s.requireUser(s.postDoc))
 	mux.HandleFunc("GET /api/docs/{owner}", s.listByOwner)
 	mux.HandleFunc("GET /api/docs/{owner}/{path...}", s.getDoc)
 	mux.HandleFunc("PUT /api/docs/{owner}/{path...}", s.requireUser(s.putDoc))
 	mux.HandleFunc("DELETE /api/docs/{owner}/{path...}", s.requireUser(s.deleteDoc))
+
+	mux.HandleFunc("GET /api/tokens", s.requireUser(s.listTokens))
+	mux.HandleFunc("POST /api/tokens", s.requireUser(s.createToken))
+	mux.HandleFunc("DELETE /api/tokens/{id}", s.requireUser(s.deleteToken))
 
 	mux.HandleFunc("GET /api/comments/{owner}/{path...}", s.listComments)
 	mux.HandleFunc("POST /api/comments/{owner}/{path...}", s.postComment)
@@ -162,26 +168,66 @@ func (s *Server) csrf(next http.Handler) http.Handler {
 
 // ---------------------------------------------------------------- авторизация
 
-// authenticate ищет сессию — сначала по куке, потом по заголовку
+// authenticate ищет, кому принадлежит запрос: сначала по куке, потом по
+// заголовку Authorization.
 //
 // Кука — путь браузера: httpOnly, скрипту токен не виден. Bearer — путь
-// скриптов и API-клиентов. Оба ведут в одну таблицу сессий.
+// скриптов и ассистентов: короткая сессия (её выдают входом) или постоянный
+// API-ключ из меню учётной записи. Ключ и сессия живут в разных таблицах, но
+// наружу это не видно: правила доступа дальше одинаковые.
 func (s *Server) authenticate(r *http.Request) *models.User {
-	tok := s.sessionCookie(r)
-	if tok == "" {
-		tok = bearerToken(r)
+	if tok := s.sessionCookie(r); tok != "" {
+		if u := s.userBySession(tok); u != nil {
+			return u
+		}
 	}
+	tok := bearerToken(r)
 	if tok == "" {
 		return nil
 	}
+	if u := s.userBySession(tok); u != nil {
+		return u
+	}
+	return s.userByAPIToken(tok)
+}
+
+// userBySession узнаёт сессию по её токену.
+func (s *Server) userBySession(tok string) *models.User {
 	var sess models.Session
 	err := s.db.Where("token_hash = ? AND expires_at > ?",
 		auth.HashToken(tok), time.Now()).First(&sess).Error
 	if err != nil {
 		return nil
 	}
+	return s.userByID(sess.UserID)
+}
+
+// userByAPIToken узнаёт постоянный ключ и отмечает, что им пользовались.
+//
+// Отметку «последний раз» пишем не каждый раз: ключ может дёргать скрипт по
+// расписанию, и лишний UPDATE на каждый запрос никому не нужен. Часа хватает,
+// чтобы в списке было видно, живой ключ или забытый.
+func (s *Server) userByAPIToken(tok string) *models.User {
+	var key models.APIToken
+	err := s.db.Where("token_hash = ?", auth.HashToken(tok)).First(&key).Error
+	if err != nil {
+		return nil
+	}
+	now := time.Now()
+	if key.Expired(now) {
+		return nil
+	}
+	if key.LastUsedAt == nil || now.Sub(*key.LastUsedAt) > time.Hour {
+		if err := s.db.Model(&key).Update("last_used_at", now).Error; err != nil {
+			log.Printf("отметка использования ключа %d: %v", key.ID, err)
+		}
+	}
+	return s.userByID(key.UserID)
+}
+
+func (s *Server) userByID(id uint) *models.User {
 	var u models.User
-	if err := s.db.First(&u, sess.UserID).Error; err != nil {
+	if err := s.db.First(&u, id).Error; err != nil {
 		return nil
 	}
 	return &u

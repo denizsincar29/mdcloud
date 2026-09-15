@@ -128,14 +128,76 @@ func (s *Server) getDoc(w http.ResponseWriter, r *http.Request) {
 
 // ---------------------------------------------------------------- запись
 
+// docInput — что можно приложить к документу при записи. Всё указателями:
+// «не прислали» и «прислали пустое» — разные вещи, а PUT обновляет только то,
+// что пришло в теле.
+type docInput struct {
+	Path                *string `json:"path"`
+	Title               *string `json:"title"`
+	Content             *string `json:"content"`
+	Visibility          *string `json:"visibility"`
+	Public              *bool   `json:"public"` // короткая форма visibility
+	CommentsOn          *bool   `json:"comments_on"`
+	CommentsRequireAuth *bool   `json:"comments_require_auth"`
+}
+
+// visibility разрешает обе формы: «visibility»: «public» и «public»: true.
+// Если пришли обе и они противоречат друг другу — это ошибка в запросе, а не
+// повод выбрать одну наугад.
+func (in *docInput) visibility() (string, bool) {
+	byName := ""
+	if in.Visibility != nil {
+		byName = strings.TrimSpace(*in.Visibility)
+		switch byName {
+		case "", models.VisPublic, models.VisPrivate:
+		default:
+			return "", false
+		}
+	}
+	byFlag := ""
+	if in.Public != nil {
+		if *in.Public {
+			byFlag = models.VisPublic
+		} else {
+			byFlag = models.VisPrivate
+		}
+	}
+	if byName != "" && byFlag != "" && byName != byFlag {
+		return "", false
+	}
+	if byName != "" {
+		return byName, true
+	}
+	return byFlag, true // пусто — «как было» либо значение по умолчанию
+}
+
+// postDoc — POST /api/docs: сохранить документ в свой аккаунт.
+//
+// Путь приходит в теле, а не в адресе: такому запросу не нужно знать имя
+// владельца — оно и есть тот, чей ключ пришёл. Существующий документ
+// обновляется (200), новый заводится (201) — для скрипта разницы нет, но
+// ответ говорит, что именно произошло.
+func (s *Server) postDoc(w http.ResponseWriter, r *http.Request, u *models.User) {
+	var in docInput
+	if !decodeJSON(w, r, &in, int64(s.cfg.MaxDocBytes)+8192) {
+		return
+	}
+	if in.Path == nil || strings.TrimSpace(*in.Path) == "" {
+		writeErr(w, http.StatusBadRequest, "не указан путь документа")
+		return
+	}
+	path, err := mdpath.Normalize(*in.Path)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	s.saveDoc(w, u, u, path, &in)
+}
+
 func (s *Server) putDoc(w http.ResponseWriter, r *http.Request, u *models.User) {
 	owner, ok := s.findUser(r.PathValue("owner"))
 	if !ok {
 		writeErr(w, http.StatusNotFound, "нет такого пользователя")
-		return
-	}
-	if owner.ID != u.ID {
-		writeErr(w, http.StatusForbidden, "править можно только свои документы")
 		return
 	}
 	path, err := mdpath.Normalize(r.PathValue("path"))
@@ -143,22 +205,26 @@ func (s *Server) putDoc(w http.ResponseWriter, r *http.Request, u *models.User) 
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-
-	var in struct {
-		Title               *string `json:"title"`
-		Content             *string `json:"content"`
-		Visibility          *string `json:"visibility"`
-		CommentsOn          *bool   `json:"comments_on"`
-		CommentsRequireAuth *bool   `json:"comments_require_auth"`
-	}
+	var in docInput
 	if !decodeJSON(w, r, &in, int64(s.cfg.MaxDocBytes)+8192) {
+		return
+	}
+	s.saveDoc(w, u, owner, path, &in)
+}
+
+// saveDoc — общий путь записи: проверки, создание или обновление, ответ. Им
+// пользуются и PUT по адресу, и POST с путём в теле.
+func (s *Server) saveDoc(w http.ResponseWriter, u, owner *models.User, path string, in *docInput) {
+	if owner.ID != u.ID {
+		writeErr(w, http.StatusForbidden, "править можно только свои документы")
 		return
 	}
 	if in.Content != nil && len(*in.Content) > s.cfg.MaxDocBytes {
 		writeErr(w, http.StatusRequestEntityTooLarge, "документ больше допустимого размера")
 		return
 	}
-	if in.Visibility != nil && *in.Visibility != models.VisPublic && *in.Visibility != models.VisPrivate {
+	visibility, ok := in.visibility()
+	if !ok {
 		writeErr(w, http.StatusBadRequest, "видимость бывает только public или private")
 		return
 	}
@@ -168,9 +234,11 @@ func (s *Server) putDoc(w http.ResponseWriter, r *http.Request, u *models.User) 
 	}
 
 	var doc models.Doc
-	err = s.db.Where("owner_id = ? AND path = ?", owner.ID, path).First(&doc).Error
+	err := s.db.Where("owner_id = ? AND path = ?", owner.ID, path).First(&doc).Error
+	created := false
 	switch {
 	case errors.Is(err, gorm.ErrRecordNotFound):
+		created = true
 		doc = models.Doc{
 			OwnerID:    owner.ID,
 			Path:       path,
@@ -193,8 +261,8 @@ func (s *Server) putDoc(w http.ResponseWriter, r *http.Request, u *models.User) 
 	if in.Title != nil {
 		doc.Title = strings.TrimSpace(*in.Title)
 	}
-	if in.Visibility != nil {
-		doc.Visibility = *in.Visibility
+	if visibility != "" {
+		doc.Visibility = visibility
 	}
 	if in.CommentsOn != nil {
 		doc.CommentsOn = *in.CommentsOn
@@ -207,7 +275,11 @@ func (s *Server) putDoc(w http.ResponseWriter, r *http.Request, u *models.User) 
 		writeErr(w, http.StatusInternalServerError, "не смог сохранить документ")
 		return
 	}
-	writeJSON(w, http.StatusOK, s.viewDoc(&doc, owner.Username, u, true))
+	code := http.StatusOK
+	if created {
+		code = http.StatusCreated
+	}
+	writeJSON(w, code, s.viewDoc(&doc, owner.Username, u, true))
 }
 
 func (s *Server) deleteDoc(w http.ResponseWriter, r *http.Request, u *models.User) {

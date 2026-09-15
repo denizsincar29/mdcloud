@@ -37,14 +37,21 @@ func Open(dsn string) (*gorm.DB, error) {
 // осознанный выбор: деплой не требует отдельного шага с миграциями.
 func Migrate(db *gorm.DB) error {
 	return db.AutoMigrate(
-		&models.User{}, &models.Doc{}, &models.Comment{}, &models.Session{}, &models.Invite{})
+		&models.User{}, &models.Doc{}, &models.Comment{}, &models.Session{},
+		&models.Invite{}, &models.APIToken{})
 }
 
-// PurgeExpired удаляет протухшие сессии. Приглашения не трогаем: у них
-// срок — это «до какого числа можно воспользоваться», а не «когда забыть»,
-// и список должен помнить, кому что выдали.
+// PurgeExpired удаляет протухшие сессии и просроченные API-ключи. Приглашения
+// не трогаем: у них срок — это «до какого числа можно воспользоваться», а не
+// «когда забыть», и список должен помнить, кому что выдали.
 func PurgeExpired(db *gorm.DB) error {
-	return db.Where("expires_at < ?", time.Now()).Delete(&models.Session{}).Error
+	now := time.Now()
+	if err := db.Where("expires_at < ?", now).Delete(&models.Session{}).Error; err != nil {
+		return err
+	}
+	// Бессрочные ключи (expires_at IS NULL) не трогаем: их отзывают руками.
+	return db.Where("expires_at IS NOT NULL AND expires_at < ?", now).
+		Delete(&models.APIToken{}).Error
 }
 
 // EnsureOwner назначает хозяина облака, если его нет.

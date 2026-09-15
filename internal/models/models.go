@@ -110,6 +110,26 @@ func (i *Invite) Expired(now time.Time) bool { return now.After(i.ExpiresAt) }
 // Session — токен входа. В БД лежит только его хеш: утечка дампа не отдаёт
 // готовые сессии. Браузер получает токен httpOnly-кукой, скрипты — обычным
 // заголовком Authorization: Bearer.
+// APIToken — ключ для скриптов и ассистентов: в отличие от сессии он не
+// сгорает от выхода из браузера и живёт до срока или до отзыва. Хранится
+// хешем, как сессия, поэтому показать ключ можно ровно один раз — при выдаче.
+// Пустой срок — бессрочный ключ.
+type APIToken struct {
+	ID         uint       `gorm:"primarykey" json:"id"`
+	TokenHash  string     `gorm:"uniqueIndex;size:64;not null" json:"-"`
+	UserID     uint       `gorm:"index;not null" json:"user_id"`
+	Label      string     `gorm:"size:120" json:"label"`
+	ExpiresAt  *time.Time `json:"expires_at,omitempty"`
+	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
+	CreatedAt  time.Time  `json:"created_at"`
+}
+
+// Expired сообщает, что срок ключа вышел. Бессрочный (ExpiresAt пуст) не
+// протухает никогда.
+func (t *APIToken) Expired(now time.Time) bool {
+	return t.ExpiresAt != nil && now.After(*t.ExpiresAt)
+}
+
 type Session struct {
 	TokenHash string    `gorm:"primaryKey;size:64" json:"-"`
 	UserID    uint      `gorm:"index;not null" json:"user_id"`
