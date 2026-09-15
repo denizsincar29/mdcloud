@@ -2,6 +2,7 @@
 package store
 
 import (
+	"errors"
 	"fmt"
 	"time"
 
@@ -45,4 +46,34 @@ func Migrate(db *gorm.DB) error {
 // и список должен помнить, кому что выдали.
 func PurgeExpired(db *gorm.DB) error {
 	return db.Where("expires_at < ?", time.Now()).Delete(&models.Session{}).Error
+}
+
+// EnsureOwner назначает хозяина облака, если его нет.
+//
+// Право выдавать приглашения появилось позже самих аккаунтов: у облака,
+// заведённого до этого, все пользователи обычные, и приглашения выписывать
+// некому. Хозяин — самый первый по времени регистрации: на одно-user облаке
+// это и есть владелец, а на большем выбор не хуже любого другого и виден
+// в списке пользователей.
+func EnsureOwner(db *gorm.DB, logf func(string, ...any)) error {
+	var admins int64
+	if err := db.Model(&models.User{}).Where("is_admin = ?", true).Count(&admins).Error; err != nil {
+		return err
+	}
+	if admins > 0 {
+		return nil
+	}
+	var first models.User
+	if err := db.Order("id ASC").First(&first).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil // пользователей ещё нет: хозяином станет первый зарегистрировавшийся
+		}
+		return err
+	}
+	if err := db.Model(&models.User{}).Where("id = ?", first.ID).
+		Update("is_admin", true).Error; err != nil {
+		return err
+	}
+	logf("%s назначен хозяином облака — он выдаёт приглашения", first.Username)
+	return nil
 }

@@ -146,6 +146,10 @@ account, so two people cannot use one code and a failed signup does not burn it.
 `POST /api/invites` returns `https://<cloud>/#invite=<code>`; the code lives in
 the URL fragment and never reaches the server or its logs.
 
+If an existing cloud ends up with no admin at all (accounts created before
+invites existed), the oldest account is promoted to owner at startup — there has
+to be somebody who can hand out codes.
+
 ## Security notes
 
 - Session tokens and invite codes are stored as SHA-256 hashes.

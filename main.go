@@ -35,6 +35,9 @@ func main() {
 	if err := store.PurgeExpired(db); err != nil {
 		log.Printf("чистка сессий: %v", err)
 	}
+	if err := store.EnsureOwner(db, log.Printf); err != nil {
+		log.Printf("хозяин облака: %v", err)
+	}
 
 	// Протухшие сессии и коды перехода подчищаем сами: таблица маленькая,
 	// но копить в ней хлам незачем.
