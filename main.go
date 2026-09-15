@@ -39,6 +39,15 @@ func main() {
 		log.Printf("хозяин облака: %v", err)
 	}
 
+	// Строка про вход: по ней в журнале видно, как настроена кука, — не
+	// приходится лезть в .env, чтобы понять, почему редактор «не видит» вход.
+	registration := "по приглашению"
+	if cfg.AllowRegistration {
+		registration = "открытая"
+	}
+	log.Printf("вход: кука %q домен %q secure=%v ttl=%s; регистрация: %s",
+		cfg.CookieName, cfg.CookieDomain, cfg.CookieSecure, cfg.SessionTTL, registration)
+
 	// Протухшие сессии и коды перехода подчищаем сами: таблица маленькая,
 	// но копить в ней хлам незачем.
 	go func() {

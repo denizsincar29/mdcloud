@@ -2,7 +2,6 @@
 package store
 
 import (
-	"errors"
 	"fmt"
 	"time"
 
@@ -56,7 +55,13 @@ func PurgeExpired(db *gorm.DB) error {
 // это и есть владелец, а на большем выбор не хуже любого другого и виден
 // в списке пользователей.
 func EnsureOwner(db *gorm.DB, logf func(string, ...any)) error {
-	var admins int64
+	var users, admins int64
+	if err := db.Model(&models.User{}).Count(&users).Error; err != nil {
+		return err
+	}
+	if users == 0 {
+		return nil // пользователей ещё нет: хозяином станет первый зарегистрировавшийся
+	}
 	if err := db.Model(&models.User{}).Where("is_admin = ?", true).Count(&admins).Error; err != nil {
 		return err
 	}
@@ -65,9 +70,6 @@ func EnsureOwner(db *gorm.DB, logf func(string, ...any)) error {
 	}
 	var first models.User
 	if err := db.Order("id ASC").First(&first).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil // пользователей ещё нет: хозяином станет первый зарегистрировавшийся
-		}
 		return err
 	}
 	if err := db.Model(&models.User{}).Where("id = ?", first.ID).
