@@ -757,6 +757,30 @@ func TestWriteLimit(t *testing.T) {
 	}
 }
 
+// У предела на попытки регистрации (10 в час) отказ такой же, как у общего:
+// 429 с Retry-After. Общий предел стоит в middleware, а этот — в самом
+// обработчике, и без заголовка отказы выглядели бы по-разному.
+func TestRegisterLimitSendsRetryAfter(t *testing.T) {
+	srv := newTestServerWith(t, func(c *config.Config) {
+		c.RateLimit = 100000
+		c.WriteLimit = 100000
+	})
+	// Имя заведомо негодное: такие запросы считаются, но аккаунтов не заводят.
+	bad := map[string]any{"username": "X", "password": "parol1234", "consent": true}
+	for i := 0; i < 10; i++ {
+		if st, _, _ := do(t, srv, "POST", "/api/auth/register", bad, opts{}); st != http.StatusBadRequest {
+			t.Fatalf("попытка %d: %d, ждали 400", i+1, st)
+		}
+	}
+	st, body, resp := do(t, srv, "POST", "/api/auth/register", bad, opts{})
+	if st != http.StatusTooManyRequests {
+		t.Fatalf("попытка сверх предела: %d %v, ждали 429", st, body)
+	}
+	if got := resp.Header.Get("Retry-After"); got != "3600" {
+		t.Errorf("Retry-After: %q, ждали 3600 (час)", got)
+	}
+}
+
 // О новой регистрации хозяин узнаёт из ntfy: регистрация открыта, и это
 // единственная новость, которую стоит рассказывать сразу.
 func TestRegistrationNotifiesOwner(t *testing.T) {

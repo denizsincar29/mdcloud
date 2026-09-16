@@ -19,6 +19,15 @@ const (
 	policyRevision = "2026-09-15"
 )
 
+// Пределы на попытки входа и регистрации — рядом с окном, которое уходит в
+// Retry-After: разъехавшись, они соврали бы человеку про «подождите немного».
+const (
+	registerLimit = 10
+	registerTries = time.Hour
+	loginLimit    = 20
+	loginTries    = 10 * time.Minute
+)
+
 // userView — то, что можно показывать наружу. Хеш пароля не покидает сервер.
 // И почты здесь нет: её у аккаунта больше нет.
 type userView struct {
@@ -45,7 +54,8 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 // больше нет, а порядок держит хозяин — он видит нового человека (уведомление
 // в ntfy, список учётных записей) и убирает учётку, если она ни к чему.
 func (s *Server) register(w http.ResponseWriter, r *http.Request) {
-	if !s.lim.allow("reg:"+clientIP(r), 10, time.Hour) {
+	if !s.lim.allow("reg:"+clientIP(r), registerLimit, registerTries) {
+		retryAfter(w, registerTries)
 		writeErr(w, http.StatusTooManyRequests, "слишком много попыток регистрации, попробуйте позже")
 		return
 	}
@@ -178,7 +188,8 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &in, 4096) {
 		return
 	}
-	if !s.lim.allow("login:"+clientIP(r), 20, 10*time.Minute) {
+	if !s.lim.allow("login:"+clientIP(r), loginLimit, loginTries) {
+		retryAfter(w, loginTries)
 		writeErr(w, http.StatusTooManyRequests, "слишком много попыток входа, подождите немного")
 		return
 	}

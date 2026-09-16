@@ -105,6 +105,7 @@ func (s *Server) postComment(w http.ResponseWriter, r *http.Request) {
 
 	ipHash := auth.HashIP(s.cfg.IPSalt, clientIP(r))
 	if !s.lim.allow("comment:"+ipHash, s.cfg.CommentLimit, s.cfg.CommentWindow) {
+		retryAfter(w, s.cfg.CommentWindow)
 		writeErr(w, http.StatusTooManyRequests, "слишком часто — подождите немного")
 		return
 	}
