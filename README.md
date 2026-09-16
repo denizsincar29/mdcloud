@@ -34,7 +34,14 @@ never send to a server.
   and over. The open document shows its full address and has a
   **Переименовать** button next to it, which moves the document (content and
   comments travel along, an occupied address answers `409`).
-- **Visibility** is per document: `public` or `private`, private is the default.
+- **Visibility** is per document and has three settings, chosen from a list on
+  the document page: `private` (the default — you and the people you sent it
+  to), `link` (anyone who knows the address, but it never shows up in someone
+  else's document list) and `public` (open to all, listed). The two open modes
+  read the same way by direct address — the difference between them is the list,
+  and between them and `private` it is whether a stranger may read the document
+  at all. The picker saves on a button, not on the arrow keys: stepping through
+  the options must not open the document to the world.
 - **Comments** can be anonymous (with a name you type) or from a logged-in user.
   A comment can point at a line of the document: `{line 5}` renders as a link
   labelled «строка 5», and `[здесь]{line 5}` uses the bracketed text as its
@@ -161,8 +168,8 @@ An assistant-readable walkthrough of the whole surface lives at
 | `GET` | `/api/config` | anyone | registration mode (`first`/`open`/`invite`/`closed`), cloud and editor URLs |
 | `GET` | `/api/docs` | signed in | all of your documents, private included |
 | `POST` | `/api/docs` | signed in | save `{path, content?, title?, public?, visibility?, expires_in_days?, …}` under the caller → `201` created / `200` updated |
-| `GET` | `/api/docs/{owner}` | anyone | that user's public documents |
-| `GET` | `/api/docs/{owner}/{path...}` | anyone | one document with its markdown (a private one only for its owner and its recipients; the owner's copy carries `shared_with`) |
+| `GET` | `/api/docs/{owner}` | anyone | that user's public documents — a `link` document opens by its address but is never listed here |
+| `GET` | `/api/docs/{owner}/{path...}` | anyone | one document with its markdown (`public` and `link` open to anyone; a private one only for its owner and its recipients; the owner's copy carries `shared_with`) |
 | `PUT` | `/api/docs/{owner}/{path...}` | owner | create/update `{title?, content?, visibility?, comments_on?, comments_require_auth?, expires_in_days?}` |
 | `PATCH` | `/api/docs/{owner}/{path...}` | owner | `{path}` — перенести на другой адрес (`409`, если адрес занят) |
 | `DELETE` | `/api/docs/{owner}/{path...}` | owner | soft delete |
@@ -170,7 +177,7 @@ An assistant-readable walkthrough of the whole surface lives at
 | `GET` | `/api/shared` | signed in | documents sent to you, newest first — no markdown |
 | `POST` | `/api/share` | owner | `{owner, path, username}` — send a document to a person |
 | `DELETE` | `/api/share?owner&path&username` | owner | take it back |
-| `GET` | `/api/comments/{owner}/{path...}` | anyone | comments (private docs excluded) |
+| `GET` | `/api/comments/{owner}/{path...}` | anyone | comments (on a private document — only for its owner and recipients) |
 | `POST` | `/api/comments/{owner}/{path...}` | anyone | `{body, name?}` — name is required when anonymous |
 | `DELETE` | `/api/comments/{id}` | author or doc owner | delete a comment |
 | `GET` | `/api/invites` | admin | issued invites and their state (codes are never returned) |

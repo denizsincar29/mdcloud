@@ -117,9 +117,11 @@ func (s *Server) docForRequest(w http.ResponseWriter, r *http.Request, viewer *m
 		return nil, nil, false
 	}
 	// Приватный документ открыт хозяину и тому, кому его отправили; для
-	// остальных его не существует.
+	// остальных его не существует. Публичный и «по ссылке» читает всякий, кто
+	// знает адрес, — разница между ними в списке, а не здесь: сюда и тот, и
+	// другой попадает по прямой ссылке.
 	if errors.Is(err, gorm.ErrRecordNotFound) ||
-		(!doc.IsPublic() && (viewer == nil ||
+		(!doc.IsOpen() && (viewer == nil ||
 			(viewer.ID != owner.ID && !s.sharedWith(doc.ID, viewer.ID)))) {
 		writeErr(w, http.StatusNotFound, "нет такого документа")
 		return nil, nil, false
@@ -153,6 +155,9 @@ func (s *Server) listByOwner(w http.ResponseWriter, r *http.Request) {
 func (s *Server) respondDocList(w http.ResponseWriter, owner, viewer *models.User) {
 	q := s.db.Where("owner_id = ?", owner.ID)
 	if viewer == nil || viewer.ID != owner.ID {
+		// Чужому в списке — только публичное. Документ «по ссылке» из списка
+		// выпадает намеренно: его и заводят затем, чтобы он не попадался на
+		// глаза, а открывался тому, кому адрес назвали.
 		q = q.Where("visibility = ?", models.VisPublic)
 	}
 	// Документы с вышедшим сроком не показываем и хозяину: подметатель
@@ -215,12 +220,16 @@ const maxExpiryDays = 3650
 // visibility разрешает обе формы: «visibility»: «public» и «public»: true.
 // Если пришли обе и они противоречат друг другу — это ошибка в запросе, а не
 // повод выбрать одну наугад.
+//
+// Именованная форма знает три значения (public, link, private), флаг — только
+// два: он остался от тех времён, когда режимов было два, и трогать его незачем
+// — по нему пишут скрипты. Третий режим просят именем.
 func (in *docInput) visibility() (string, bool) {
 	byName := ""
 	if in.Visibility != nil {
 		byName = strings.TrimSpace(*in.Visibility)
 		switch byName {
-		case "", models.VisPublic, models.VisPrivate:
+		case "", models.VisPublic, models.VisLink, models.VisPrivate:
 		default:
 			return "", false
 		}
@@ -387,7 +396,7 @@ func (s *Server) saveDoc(w http.ResponseWriter, u, owner *models.User, path stri
 	}
 	visibility, ok := in.visibility()
 	if !ok {
-		writeErr(w, http.StatusBadRequest, "видимость бывает только public или private")
+		writeErr(w, http.StatusBadRequest, "видимость бывает public, link или private")
 		return
 	}
 	if in.Title != nil && len([]rune(*in.Title)) > 255 {

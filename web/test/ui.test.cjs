@@ -384,9 +384,10 @@ async function main() {
         body: {
           docs: [
             { path: "заметки", slug: "zametki", title: "заметки", visibility: "public" },
-            { path: "сафу/мо/лаб1", slug: "safu/mo/lab1", title: "лаб1", visibility: "private" },
+            { path: "сафу/мо/лаб1", slug: "safu/mo/lab1", title: "лаб1", visibility: "link" },
             { path: "сафу/мо/лаб2", slug: "safu/mo/lab2", title: "лаб2", visibility: "public", expires_at: soon },
             { path: "сафу/ии/конспект", slug: "safu/ii/konspekt", title: "конспект", visibility: "public" },
+            { path: "сафу/ии/личное", slug: "safu/ii/lichnoe", title: "личное", visibility: "private" },
           ],
         },
       }),
@@ -402,9 +403,16 @@ async function main() {
     ok("в папке видны только имена файлов, без пути",
       groups[0].names.join(",") === "заметки" && groups[2].names.join(",") === "лаб1,лаб2",
       JSON.stringify(groups));
-    ok("приватность помечена у нужного файла",
-      /приватный/.test(list.querySelectorAll("li.folder")[2].querySelectorAll("li")[0].textContent),
-      list.innerHTML);
+    // Режимов три, и в списке они различимы: «приватный» и «по ссылке» —
+    // разные вещи, спутать их значит назвать не тот адрес.
+    const ii = list.querySelectorAll("li.folder")[1].querySelectorAll("li");
+    ok("приватный документ помечен приватным",
+      /приватный/.test(ii[1].textContent), ii[1].textContent);
+    const mo = list.querySelectorAll("li.folder")[2].querySelectorAll("li");
+    ok("документ по ссылке помечен «по ссылке»",
+      /по ссылке/.test(mo[0].textContent), mo[0].textContent);
+    ok("публичный документ метки не получил",
+      !/приватный|по ссылке/.test(ii[0].textContent), ii[0].textContent);
     // Документ на срок помечен в списке: иначе он возьмёт и пропадёт незаметно.
     const until = new Date(soon).toLocaleDateString("ru-RU");
     ok("у документа на срок видно, до какого числа он живёт",
@@ -414,7 +422,7 @@ async function main() {
     // бы в «%D0%94…» — такую ссылку не продиктовать и не прочитать с экрана.
     const hrefs = [...list.querySelectorAll("a")].map((a) => a.getAttribute("href"));
     ok("ссылки ведут на полный адрес документа латиницей",
-      hrefs.join(", ") === "/deniz/zametki, /deniz/safu/ii/konspekt, /deniz/safu/mo/lab1, /deniz/safu/mo/lab2",
+      hrefs.join(", ") === "/deniz/zametki, /deniz/safu/ii/konspekt, /deniz/safu/ii/lichnoe, /deniz/safu/mo/lab1, /deniz/safu/mo/lab2",
       hrefs.join(", "));
   }
 
@@ -483,6 +491,54 @@ async function main() {
     const { $ } = await boot({ path: "/deniz/lab1", api });
     ok("поля подписи у вошедшего нет", $("comment-name-row").hidden === true);
     ok("и подсказки про подпись тоже нет", $("comment-hint").textContent === "", $("comment-hint").textContent);
+  }
+
+  // --- 8е. Доступ — выбор из трёх, а не тумблер -------------------------------
+  {
+    const doc = {
+      owner: "deniz", path: "lab1", slug: "lab1", title: "Лаба",
+      content: "текст", visibility: "private", updated_at: "2026-09-15T10:00:00Z", can_edit: true,
+    };
+    let current = doc;
+    const api = makeApi({
+      "GET /api/me": () => ({ status: 200, body: { user: { username: "deniz", is_admin: true } } }),
+      "GET /api/docs/deniz/lab1": () => ({ status: 200, body: current }),
+      "GET /api/comments/deniz/lab1": () => ({
+        status: 200,
+        body: { comments: [], comments_on: true, can_comment: true, require_auth: false, viewer_authenticated: true },
+      }),
+      "PUT /api/docs/deniz/lab1": () => {
+        current = { ...doc, visibility: "link" };
+        return { status: 200, body: current };
+      },
+    });
+    const { $, w, tick } = await boot({ path: "/deniz/lab1", api });
+
+    ok("выбор доступа виден хозяину", $("vis-form").hidden === false);
+    ok("в выборе стоит текущий режим", $("vis-select").value === "private", $("vis-select").value);
+    ok("вариантов три, и они названы словами",
+      [...$("vis-select").options].map((o) => o.value).join(",") === "private,link,public",
+      [...$("vis-select").options].map((o) => o.value).join(","));
+    ok("приватный документ назван приватным в строке состояния",
+      /приватный/.test($("doc-meta").textContent), $("doc-meta").textContent);
+
+    // Сам выбор ничего не отправляет: перебирая варианты стрелками, человек не
+    // должен открывать документ всем на свете — для этого есть кнопка.
+    $("vis-select").value = "link";
+    await tick();
+    ok("смена значения в списке ничего не отправила",
+      !api.calls.some((c) => c.key.startsWith("PUT ")), JSON.stringify(api.calls.map((c) => c.key)));
+
+    submit(w, $("vis-form"));
+    await tick(); // PUT, затем перерисовка документа
+    await tick();
+    const call = api.calls.find((c) => c.key === "PUT /api/docs/deniz/lab1");
+    ok("режим ушёл в API", Boolean(call), JSON.stringify(api.calls.map((c) => c.key)));
+    ok("в теле выбранный режим", call && call.init.body.includes('"visibility":"link"'), call && call.init.body);
+    ok("сказано, что документ открыт по ссылке",
+      /по ссылке/.test($("status").textContent), $("status").textContent);
+    ok("в выборе остался новый режим", $("vis-select").value === "link", $("vis-select").value);
+    ok("и в строке состояния тоже", /по ссылке/.test($("doc-meta").textContent), $("doc-meta").textContent);
   }
 
   // --- 8д. Блок desmos: контейнер и рамка с графиком -------------------------
@@ -913,7 +969,7 @@ async function main() {
       /прислан вам/.test($("doc-meta").textContent), $("doc-meta").textContent);
     // Правка, публикация, срок и отправка — хозяйские кнопки: у того, кому
     // документ дали почитать, их быть не должно.
-    for (const id of ["edit", "toggle-vis", "rename-toggle", "expiry-toggle", "share-toggle"]) {
+    for (const id of ["edit", "vis-form", "rename-toggle", "expiry-toggle", "share-toggle"]) {
       ok("у получателя нет кнопки «" + id + "»", $(id).hidden === true);
     }
   }

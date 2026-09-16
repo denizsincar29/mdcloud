@@ -67,6 +67,16 @@ function docAddress(doc) {
   return doc.owner + "/" + (doc.slug || doc.path);
 }
 
+// visLabel — как режим доступа называется человеку. Слово одно на весь
+// интерфейс: им подписана строка состояния, метка в списке и вариант выбора.
+// Значение приходит с сервера строкой, поэтому незнакомое читаем как закрытое
+// — «приватный» — а не как «что-то непонятное».
+function visLabel(visibility) {
+  if (visibility === "public") return "публичный";
+  if (visibility === "link") return "по ссылке";
+  return "приватный";
+}
+
 // untilText — дата, до которой документ живёт. Считаем по календарю, а не по
 // остатку часов: «удалить через неделю» — это число, которое человек назвал.
 function untilText(when) {
@@ -573,10 +583,13 @@ function docRow(owner, doc, folder) {
   const leaf = folder === "/" ? doc.path : doc.path.slice(folder.length + 1);
   a.textContent = doc.title || leaf;
   li.append(a);
+  // В списке помечаем всё, что не открыто всем: хозяин должен отличать
+  // приватные документы от «по ссылке» — иначе непонятно, какой адрес можно
+  // называть, а какой нет.
   if (doc.visibility !== "public") {
     const mark = document.createElement("span");
     mark.className = "meta";
-    mark.textContent = " — приватный";
+    mark.textContent = " — " + visLabel(doc.visibility);
     li.append(mark);
   }
   // Документ на срок помечаем в списке: иначе о нём не вспомнить, а он возьмёт
@@ -695,13 +708,16 @@ async function openDoc(owner, path) {
   el("doc-title").textContent = doc.title || doc.path;
   document.title = (doc.title || doc.path) + " — mdcloud";
   // Свой документ — «приватный», присланный — «прислан вам»: иначе читатель
-  // гадает, почему чужая работа закрыта для остальных, а открыта ему.
+  // гадает, почему чужая работа закрыта для остальных, а открыта ему. Открытые
+  // режимы называются одинаково для всех: «присланным» документ, доступный
+  // всякому по адресу, назвать нельзя — читатель решил бы, что он один такой.
   const own = !state.user || state.user.username === doc.owner;
+  const access = doc.visibility === "private" && !own
+    ? "прислан вам"
+    : visLabel(doc.visibility);
   el("doc-meta").textContent = [
     "Адрес: " + docAddress(doc),
-    doc.visibility === "public"
-      ? "публичный"
-      : own ? "приватный" : "прислан вам",
+    access,
     "обновлён " + new Date(doc.updated_at).toLocaleString("ru-RU"),
   ].join(" · ");
 
@@ -731,7 +747,7 @@ async function openDoc(owner, path) {
   }
 
   el("edit").hidden = !doc.can_edit;
-  el("toggle-vis").hidden = !doc.can_edit;
+  el("vis-form").hidden = !doc.can_edit;
   el("rename-toggle").hidden = !doc.can_edit;
   el("expiry-toggle").hidden = !doc.can_edit;
   el("share-toggle").hidden = !doc.can_edit;
@@ -742,8 +758,10 @@ async function openDoc(owner, path) {
   // отправка второй раз тому же человеку выглядит как потерянная.
   paintShareList(doc.shared_with || []);
   if (doc.can_edit) {
-    el("toggle-vis").textContent =
-      doc.visibility === "public" ? "Сделать приватным" : "Сделать публичным";
+    // В выборе стоит текущий режим: человек должен видеть, что у документа
+    // сейчас, а не догадываться по надписи на кнопке.
+    el("vis-select").value = doc.visibility;
+    if (!el("vis-select").value) el("vis-select").value = "private";
   }
 
   await loadComments(owner, doc);
@@ -1323,15 +1341,30 @@ function paintShareList(names) {
   }
 }
 
-el("toggle-vis").addEventListener("click", async () => {
-  const next = state.doc.visibility === "public" ? "private" : "public";
+// Режим доступа — выбор из трёх, а не переключатель: «по ссылке» посередине
+// между «никто» и «все», и кнопкой-тумблером его не показать. Сохранение
+// отдельной кнопкой: выбор стрелками в списке не должен менять документ на
+// каждом нажатии — иначе, перебирая варианты, человек открывает его всему
+// интернету и не замечает этого.
+const visWords = {
+  private: "Документ приватный: читаете вы и те, кому отправили.",
+  link: "Документ открыт по ссылке: кто знает адрес, тот и читает. В чужих списках его нет.",
+  public: "Документ публичный: открыт всем и стоит в вашем списке.",
+};
+
+el("vis-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const next = el("vis-select").value;
+  if (next === state.doc.visibility) {
+    status("Доступ не менялся — " + visLabel(next) + ".");
+    return;
+  }
   try {
     const doc = await api(apiPath(state.doc.owner, state.doc.path),
       { method: "PUT", body: { visibility: next } });
     state.doc = doc;
-    status(next === "public" ? "Документ открыт для всех." : "Документ теперь приватный.");
     await openDoc(doc.owner, doc.path);
-    status(next === "public" ? "Документ открыт для всех." : "Документ теперь приватный.");
+    status(visWords[next] || "Доступ сохранён.");
   } catch (err) {
     fail(err);
   }

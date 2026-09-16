@@ -126,11 +126,24 @@
     <p id="doc-expiry" class="meta" hidden></p>
     <p class="actions">
       <button id="edit" type="button" hidden>Редактировать</button>
-      <button id="toggle-vis" type="button" hidden></button>
       <button id="rename-toggle" type="button" hidden>Переименовать</button>
       <button id="expiry-toggle" type="button" hidden>Срок хранения</button>
       <button id="share-toggle" type="button" hidden>Отправить человеку</button>
     </p>
+    <form id="vis-form" hidden>
+      <label for="vis-select">Кто может читать документ</label>
+      <select id="vis-select" name="visibility">
+        <option value="private">Приватный — только вы и те, кому отправили</option>
+        <option value="link">По ссылке — кто знает адрес</option>
+        <option value="public">Публичный — виден всем в списке документов</option>
+      </select>
+      <button type="submit">Сохранить доступ</button>
+      <p class="hint">Приватный документ открыт вам и тем, кому вы его отправили.
+        «По ссылке» открывается любому, кто знает адрес, но в чужом списке
+        документов не показывается — у вас он на месте и помечен. Публичный
+        открыт всем и стоит в списке на виду. Режим меняется сразу и написанного
+        не трогает.</p>
+    </form>
     <div id="share-block" hidden>
       <p id="share-summary" class="meta"></p>
       <ul id="share-list" class="doclist"></ul>

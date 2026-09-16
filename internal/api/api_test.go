@@ -212,6 +212,70 @@ func TestDocVisibilityAndOwnership(t *testing.T) {
 	}
 }
 
+// Документ «по ссылке»: открыт всякому, кто знает адрес, но в чужом списке
+// документов его нет. В этом вся разница с публичным — читают одинаково,
+// а на глаза попадаются по-разному.
+func TestDocByLink(t *testing.T) {
+	srv := newTestServer(t)
+	deniz := register(t, srv, "deniz", "parol1234")
+	vasya := register(t, srv, "vasilisa", "parol1234")
+
+	const docPath = "/api/docs/deniz/заметки/черновик"
+	st, doc := req(t, srv, "PUT", docPath, deniz,
+		map[string]any{"content": "тайное", "visibility": "link"})
+	if st != http.StatusOK || doc["visibility"] != "link" {
+		t.Fatalf("режим «по ссылке» не сохранился: %d %v", st, doc)
+	}
+
+	// По прямому адресу читают все: и аноним, и чужой залогиненный.
+	st, got := req(t, srv, "GET", docPath, "", nil)
+	if st != http.StatusOK || got["content"] != "тайное" {
+		t.Errorf("аноним по ссылке: %d %v", st, got)
+	}
+	if st, _ := req(t, srv, "GET", docPath, vasya, nil); st != http.StatusOK {
+		t.Errorf("чужой по ссылке: %d, ждали 200", st)
+	}
+	// Читают — но не правят: правка остаётся хозяину.
+	if st, _ := req(t, srv, "PUT", docPath, vasya, map[string]any{"content": "вандализм"}); st != http.StatusForbidden {
+		t.Errorf("правка чужого по ссылке: %d, ждали 403", st)
+	}
+
+	// А в чужом списке его нет: адрес и есть пропуск.
+	st, body := req(t, srv, "GET", "/api/docs/deniz", vasya, nil)
+	if st != http.StatusOK {
+		t.Fatalf("список чужого: %d %v", st, body)
+	}
+	if docs, _ := body["docs"].([]any); len(docs) != 0 {
+		t.Errorf("документ «по ссылке» виден в чужом списке: %v", docs)
+	}
+	// Хозяин видит его у себя: иначе он его и сам не найдёт.
+	st, body = req(t, srv, "GET", "/api/docs", deniz, nil)
+	if st != http.StatusOK {
+		t.Fatalf("свой список: %d", st)
+	}
+	if docs, _ := body["docs"].([]any); len(docs) != 1 {
+		t.Errorf("хозяин должен видеть свой документ, видит %d: %v", len(docs), docs)
+	}
+
+	// Публичный — та же открытость и вдобавок место в списке.
+	if st, doc := req(t, srv, "PUT", docPath, deniz, map[string]any{"visibility": "public"}); st != http.StatusOK || doc["visibility"] != "public" {
+		t.Fatalf("переход в публичный: %d %v", st, doc)
+	}
+	st, body = req(t, srv, "GET", "/api/docs/deniz", vasya, nil)
+	if st != http.StatusOK {
+		t.Fatalf("список чужого: %d", st)
+	}
+	if docs, _ := body["docs"].([]any); len(docs) != 1 {
+		t.Errorf("публичный должен быть виден в чужом списке, видно %d", len(docs))
+	}
+
+	// Выдуманный режим не принимаем — иначе документ остался бы в состоянии,
+	// которого никто не понимает.
+	if st, _ := req(t, srv, "PUT", docPath, deniz, map[string]any{"visibility": "секретно"}); st != http.StatusBadRequest {
+		t.Errorf("неизвестная видимость: %d, ждали 400", st)
+	}
+}
+
 // Адрес документа живёт в двух видах: каким его набрал человек и каким он
 // попадает в ссылку. Вести они должны к одному документу — иначе правка по
 // ссылке заводила бы второй.
