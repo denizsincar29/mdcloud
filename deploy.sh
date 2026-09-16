@@ -91,7 +91,10 @@ if [[ ! -f "$ENV_FILE" || "$RECONFIGURE" == "1" ]]; then
   ask DB_USER        "роль postgres"                "mdcloud"
   ask DB_NAME        "имя базы"                     "mdcloud"
   ask DB_PASSWORD    "пароль роли (можно оставить пустым — сгенерирую)" ""
-  ask ALLOW_REG      "регистрация без приглашения? (y/n)" "n"
+  # Тема ntfy — это канал, на который хозяин подписан в телефоне. Имя публично,
+  # поэтому по умолчанию генерируем неугадываемое: угадав тему, чужой человек
+  # прочитает уведомления и сможет слать в неё свои.
+  ask NTFY_TOPIC     "тема ntfy для уведомлений о регистрациях (пусто — без них)" ""
 
   DB_HOST="${DB_HOST:-localhost}"
   DB_PORT="${DB_PORT:-5432}"
@@ -106,7 +109,6 @@ if [[ ! -f "$ENV_FILE" || "$RECONFIGURE" == "1" ]]; then
     DB_PASSWORD="$(openssl rand -hex 16)"   # hex: пароль не сломает ни DSN, ни psql
   fi
   IP_SALT="$(openssl rand -hex 24)"
-  case "${ALLOW_REG,,}" in y|yes|да|д) ALLOW_REGISTRATION=true ;; *) ALLOW_REGISTRATION=false ;; esac
 
   cat > "$ENV_FILE" <<EOF
 # Настройки mdcloud. Файл читает и systemd (EnvironmentFile), и deploy.sh.
@@ -115,13 +117,17 @@ MDCLOUD_DATABASE_URL=postgres://$DB_USER:$DB_PASSWORD@$DB_HOST:$DB_PORT/$DB_NAME
 MDCLOUD_BASE_URL=$MDCLOUD_BASE_URL
 MDCLOUD_EDITOR_URL=$MDCLOUD_EDITOR_URL
 MDCLOUD_ALLOWED_ORIGINS=$MDCLOUD_BASE_URL,$MDCLOUD_EDITOR_URL
-MDCLOUD_ALLOW_REGISTRATION=$ALLOW_REGISTRATION
 MDCLOUD_COOKIE_DOMAIN=$COOKIE_DOMAIN
 MDCLOUD_IP_SALT=$IP_SALT
 MDCLOUD_SESSION_TTL=720h
-MDCLOUD_INVITE_TTL=336h
 MDCLOUD_COMMENT_LIMIT=10
 MDCLOUD_COMMENT_WINDOW=10m
+MDCLOUD_RATE_LIMIT=600
+MDCLOUD_RATE_WINDOW=1m
+MDCLOUD_WRITE_LIMIT=120
+MDCLOUD_WRITE_WINDOW=10m
+MDCLOUD_NTFY_URL=https://ntfy.sh
+MDCLOUD_NTFY_TOPIC=$NTFY_TOPIC
 EOF
   chmod 600 "$ENV_FILE"
   say "записал $ENV_FILE"
@@ -135,7 +141,7 @@ fi
 # иначе окружение и .env разъедутся, и сервис не подключится к базе.
 declare -A ENV_WINS=()
 for _v in MDCLOUD_ADDR MDCLOUD_BASE_URL MDCLOUD_EDITOR_URL MDCLOUD_ALLOWED_ORIGINS \
-          MDCLOUD_ALLOW_REGISTRATION MDCLOUD_COOKIE_DOMAIN MDCLOUD_IP_SALT; do
+          MDCLOUD_COOKIE_DOMAIN MDCLOUD_IP_SALT MDCLOUD_NTFY_TOPIC; do
   [[ -n "${!_v:-}" ]] && ENV_WINS[$_v]="${!_v}"
 done
 set -a; . "$ENV_FILE"; set +a
@@ -408,6 +414,11 @@ echo "    логи:    journalctl -u $SERVICE_NAME -f"
 echo "    API:     ${MDCLOUD_BASE_URL:-http://$MDCLOUD_ADDR}/api/health"
 if [[ -n "${MDCLOUD_BASE_URL:-}" ]]; then
   echo
-  echo "    Первый вход: ${MDCLOUD_BASE_URL} — заведи себе аккаунт, он и станет"
-  echo "    хозяином облака (регистрация закрыта, если ALLOW_REGISTRATION=false)."
+  echo "    Первый вход: ${MDCLOUD_BASE_URL} — заведи себе аккаунт: он станет"
+  echo "    хозяином облака (регистрация открыта всем, учётные записи ведёт хозяин)."
+  if [[ -z "${MDCLOUD_NTFY_TOPIC:-}" ]]; then
+    echo "    Уведомлений о регистрациях нет: MDCLOUD_NTFY_TOPIC в .env пуст."
+  else
+    echo "    О новых регистрациях: подпишись на ${MDCLOUD_NTFY_URL:-https://ntfy.sh}/${MDCLOUD_NTFY_TOPIC}"
+  fi
 fi

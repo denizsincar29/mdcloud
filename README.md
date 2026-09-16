@@ -133,10 +133,13 @@ is in `deploy/Caddyfile.snippet`.
 | `MDCLOUD_COOKIE_DOMAIN` | empty | cookie domain; set it to the parent domain to share the login with the editor |
 | `MDCLOUD_COOKIE_NAME` | `mdcloud_sid` | session cookie name |
 | `MDCLOUD_ALLOWED_ORIGINS` | empty | extra CORS origins (cloud and editor origins are always allowed) |
-| `MDCLOUD_ALLOW_REGISTRATION` | `false` | `true` opens registration to everyone without an invite |
 | `MDCLOUD_SESSION_TTL` | `720h` | session lifetime |
-| `MDCLOUD_INVITE_TTL` | `336h` | default invite lifetime (14 days) |
+| `MDCLOUD_RATE_LIMIT` / `MDCLOUD_RATE_WINDOW` | `600` / `1m` | per-IP limit on all `/api` requests |
+| `MDCLOUD_WRITE_LIMIT` / `MDCLOUD_WRITE_WINDOW` | `120` / `10m` | per-IP limit on state-changing requests |
 | `MDCLOUD_COMMENT_LIMIT` / `MDCLOUD_COMMENT_WINDOW` | `10` / `10m` | per-IP comment rate limit |
+| `MDCLOUD_NTFY_URL` | `https://ntfy.sh` | ntfy server to publish new-signup notices to |
+| `MDCLOUD_NTFY_TOPIC` | empty | topic to publish to; empty means no notices |
+| `MDCLOUD_NTFY_TOKEN` | empty | bearer token for a protected topic |
 | `MDCLOUD_MAX_DOC_BYTES` | `2097152` | document size cap |
 | `MDCLOUD_STATIC_DIR` | unset | serve this directory at `/` (development only) |
 
@@ -161,11 +164,11 @@ An assistant-readable walkthrough of the whole surface lives at
 
 | Method | Path | Who | What |
 | --- | --- | --- | --- |
-| `POST` | `/api/auth/register` | invited | `{username, password, consent: true, email?, display_name?, invite?}` → token + cookie |
-| `POST` | `/api/auth/login` | anyone | `{login, password}` (username or email) → token + cookie |
+| `POST` | `/api/auth/register` | anyone | `{username, password, consent: true, display_name?}` → token + cookie; the first account becomes the owner |
+| `POST` | `/api/auth/login` | anyone | `{login, password}` (username) → token + cookie |
 | `POST` | `/api/auth/logout` | signed in | drop the session, clear the cookie |
 | `GET` | `/api/me` | signed in | current user and document count |
-| `GET` | `/api/config` | anyone | registration mode (`first`/`open`/`invite`/`closed`), cloud and editor URLs |
+| `GET` | `/api/config` | anyone | registration mode (`first` — no accounts yet, `open`), cloud and editor URLs |
 | `GET` | `/api/docs` | signed in | all of your documents, private included |
 | `POST` | `/api/docs` | signed in | save `{path, content?, title?, public?, visibility?, expires_in_days?, …}` under the caller → `201` created / `200` updated |
 | `GET` | `/api/docs/{owner}` | anyone | that user's public documents — a `link` document opens by its address but is never listed here |
@@ -180,9 +183,10 @@ An assistant-readable walkthrough of the whole surface lives at
 | `GET` | `/api/comments/{owner}/{path...}` | anyone | comments (on a private document — only for its owner and recipients) |
 | `POST` | `/api/comments/{owner}/{path...}` | anyone | `{body, name?}` — name is required when anonymous |
 | `DELETE` | `/api/comments/{id}` | author or doc owner | delete a comment |
-| `GET` | `/api/invites` | admin | issued invites and their state (codes are never returned) |
-| `POST` | `/api/invites` | admin | `{note?, days?}` → `{code, url}` — shown once |
-| `DELETE` | `/api/invites/{id}` | admin | revoke an unspent invite |
+| `GET` | `/api/admin/users` | admin | every account: role, signup date, document count, last login |
+| `POST` | `/api/admin/users/{id}/admin` | admin | `{admin: true\|false}` — grant or revoke owner rights (self-demotion is `400`) |
+| `POST` | `/api/admin/users/{id}/logout` | admin | close all sessions and revoke all API keys of that account |
+| `DELETE` | `/api/admin/users/{id}` | admin | delete the account with everything it wrote (self-deletion is `400`) |
 | `GET` | `/api/tokens` | signed in | your API keys (labels, terms, last use — never the keys) |
 | `POST` | `/api/tokens` | signed in | `{label?, days?}` → `{id, token, expires_at}` — value shown once; no `days` means forever |
 | `DELETE` | `/api/tokens/{id}` | signed in | revoke your key |
@@ -241,26 +245,43 @@ never emails or anything else about an account — and only to signed-in callers
 and an empty `q` returns nothing rather than the whole list. `%` and `_` are
 escaped, so a username containing them is matched literally.
 
-## Invites
+## Registration and accounts
 
-The first registered account is the owner (`is_admin`) and needs no code. Every
-account after that needs an invite — a 16-byte code, stored only as a SHA-256
-hash, so the link is shown exactly once, when it is created, and a database dump
-hands nobody a way in. A code is spent in the same transaction that creates the
-account, so two people cannot use one code and a failed signup does not burn it.
+Registration is open: anyone who reaches the form creates an account, and the
+first account to exist becomes the owner (`is_admin`). Nothing is asked beyond a
+username, a password and consent to the personal-data policy — there is no email
+field, because the cloud never sends mail and nothing would ever be confirmed to
+it.
 
-`POST /api/invites` returns `https://<cloud>/#invite=<code>`; the code lives in
-the URL fragment and never reaches the server or its logs. The invited person
-gets the link and nothing else — the registration form has no code field, the
-code rides in the fragment and is sent along with the signup.
+Open registration is held in check by the owner, not by an admission code. New
+signups are published to ntfy (`MDCLOUD_NTFY_TOPIC`; the payload carries the
+username and the Moscow time in the JSON body, so Cyrillic survives), and the
+accounts screen lists everyone: role, signup date, documents written, last
+login. From there the owner can grant or revoke owner rights, kick an account
+out of every session and API key at once, or delete it outright — deleting takes
+the documents, comments, shares, sessions and keys with it, in one transaction.
 
-If an existing cloud ends up with no admin at all (accounts created before
-invites existed), the oldest account is promoted to owner at startup — there has
-to be somebody who can hand out codes.
+The one thing the screen will not do is leave the cloud without an owner: an
+account cannot delete itself and cannot revoke its own rights, so whoever can
+touch another account is by definition an owner, and one always remains.
+
+If an existing cloud ends up with no admin at all (accounts predating this),
+`EnsureOwner` promotes the oldest account at startup.
+
+## Rate limits
+
+`/api` is limited per client IP — `MDCLOUD_RATE_LIMIT` requests per
+`MDCLOUD_RATE_WINDOW`, with a stricter `MDCLOUD_WRITE_LIMIT` for requests that
+change something (anything but `GET`/`HEAD`/`OPTIONS`). A rejected request gets
+`429` and `Retry-After`. Registration (10/hour), login (20/10 min) and comments
+(`MDCLOUD_COMMENT_LIMIT`) keep their own separate counters.
+
+The counter lives in the process: one node is fine, two would need a shared one.
+IPs are hashed with `MDCLOUD_IP_SALT` before they are counted.
 
 ## Security notes
 
-- Session tokens and invite codes are stored as SHA-256 hashes.
+- Session tokens and API keys are stored as SHA-256 hashes.
 - The session cookie is `HttpOnly` (unreachable from JavaScript) and
   `SameSite=Lax`. A shared parent-domain cookie is visible to every subdomain
   you run — that is the price of one login for both sites, and it is worth it
@@ -313,13 +334,13 @@ uses. Nothing is loaded for documents without a ` ```desmos ` block.
 ```
 main.go                 wiring, startup, graceful shutdown
 internal/config         environment
-internal/models         users, docs, comments, sessions, invites, API keys, shares
+internal/models         users, docs, comments, sessions, API keys, shares
 internal/store          Postgres connection, AutoMigrate
-internal/auth           bcrypt, tokens, invite codes
+internal/auth           bcrypt, session tokens, IP hashing
 internal/mdpath         document path rules
 internal/api            routes and handlers
 internal/api/llm.md     API guide for assistants, served at /api/llm.md
-web/                    preview, login, registration, invites, API keys (static, served by Caddy)
+web/                    preview, login, registration, accounts, API keys (static, served by Caddy)
 web/md.mjs              markdown → HTML for the preview (frontmatter, AsciiMath)
 web/embed-desmos.*      one Desmos graph per document, framed by the preview
 web/test/               page smoke test (jsdom) and markdown test (node)
@@ -335,9 +356,10 @@ go test ./...
 
 Tests run against an in-memory SQLite database, so they need neither Postgres
 nor the network. They cover document visibility, ownership, comment rules,
-first-user/admin rules, invite redemption and expiry, sharing a document to a
-person (recipient reads, cannot edit, anon still gets `404`), cookie flags,
-CSRF and CORS, token lifecycle and path validation.
+first-user/admin rules, the accounts screen (list, kick, grant and revoke
+rights, delete, plus the refusals that keep an owner in place), rate limits,
+sharing a document to a person (recipient reads, cannot edit, anon still gets
+`404`), cookie flags, CSRF and CORS, token lifecycle and path validation.
 
 The web page has its own smoke tests (no browser):
 
@@ -347,11 +369,12 @@ node web/test/ui.test.cjs   # screens, buttons, API calls (jsdom + stubbed fetch
 node web/test/md.test.mjs   # markdown → HTML: frontmatter, AsciiMath, formulas
 ```
 
-`ui.test.cjs` drives registration, the invite link, issuing and revoking
-invites, the create-document button, the folder tree, renaming, the desmos
-frame, sending a document to a username, the username suggestions behind that
-field and the read-only view a recipient gets, and the error states against a
-stubbed API.
+`ui.test.cjs` drives registration, the accounts screen and the actions in it,
+the document action menu (roles, roving focus, arrows, typeahead, Escape
+returning focus, the delete confirmation), the create-document button, the
+folder tree, renaming, the desmos frame, sending a document to a username, the
+username suggestions behind that field and the read-only view a recipient gets,
+and the error states against a stubbed API.
 `md.test.mjs` checks what happens to a document on the way to the page —
 frontmatter goes, backticks survive as AsciiMath delimiters instead of turning
 into `<code>`, LaTeX reaches the page untouched — first against a stub, then
@@ -365,7 +388,9 @@ against the real showdown if it is installed.
 - The graph embed always starts a calculator, even when the reader only
   wanted the text; a static picture of the graph would be lighter, but then
   the graph would stop being readable by a screen reader.
-- No password reset by email, no admin UI for users (only for invites).
+- No password reset: there is no email on an account, so a forgotten password
+  is a lost account — the owner can only delete it and let the person sign up
+  again.
 - Comments are not paginated.
 - One process, one rate limiter in memory; a second node would need a shared
   counter.

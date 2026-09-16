@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -27,7 +28,7 @@ func newTestServer(t *testing.T) *httptest.Server {
 }
 
 // newTestServerWith — тот же сервер, но с правкой настроек: тестам про
-// приглашения нужна закрытая регистрация, тестам про куку — своя.
+// рейтлимит нужны свои числа, тестам про куку — свой домен.
 func newTestServerWith(t *testing.T, tweak func(*config.Config)) *httptest.Server {
 	t.Helper()
 	srv, _ := newTestServerDB(t, tweak)
@@ -49,17 +50,22 @@ func newTestServerDB(t *testing.T, tweak func(*config.Config)) (*httptest.Server
 		t.Fatalf("миграция: %v", err)
 	}
 	cfg := &config.Config{
-		BaseURL:           "https://cloud.example",
-		EditorURL:         "https://mathmd.example",
-		AllowedOrigins:    []string{"https://mathmd.example"},
-		AllowRegistration: true,
-		CookieName:        "mdcloud_sid",
-		SessionTTL:        time.Hour,
-		InviteTTL:         24 * time.Hour,
-		IPSalt:            "test-salt",
-		CommentLimit:      5,
-		CommentWindow:     time.Minute,
-		MaxDocBytes:       1 << 20,
+		BaseURL:        "https://cloud.example",
+		EditorURL:      "https://mathmd.example",
+		AllowedOrigins: []string{"https://mathmd.example"},
+		CookieName:     "mdcloud_sid",
+		SessionTTL:     time.Hour,
+		IPSalt:         "test-salt",
+		CommentLimit:   5,
+		CommentWindow:  time.Minute,
+		MaxDocBytes:    1 << 20,
+		// Пределы в тестах заведомо недостижимые: проверять рейтлимит
+		// должен тест про рейтлимит, а не случайный набор из сотни запросов
+		// с одного адреса. Свои числа тест подставляет через tweak.
+		RateLimit:   100000,
+		RateWindow:  time.Minute,
+		WriteLimit:  100000,
+		WriteWindow: time.Minute,
 	}
 	if tweak != nil {
 		tweak(cfg)
@@ -515,10 +521,10 @@ func TestCommentsOnPrivateDocAreHidden(t *testing.T) {
 	}
 }
 
-// Первый зарегистрировавшийся — хозяин облака: он проходит без приглашения
-// и получает право выписывать их другим.
+// Первый зарегистрировавшийся — хозяин облака: без него в облаке некому
+// вести учётные записи. Второй приходит на общих правах — регистрация открыта.
 func TestFirstUserIsAdmin(t *testing.T) {
-	srv := newTestServerWith(t, func(c *config.Config) { c.AllowRegistration = false })
+	srv := newTestServer(t)
 
 	st, body := req(t, srv, "POST", "/api/auth/register", "",
 		map[string]any{"consent": true, "username": "deniz", "password": "parol1234"})
@@ -529,125 +535,262 @@ func TestFirstUserIsAdmin(t *testing.T) {
 	if user["is_admin"] != true {
 		t.Errorf("первый пользователь должен быть админом: %v", user)
 	}
+	// Почты в ответе нет: её у аккаунта больше нет.
+	if _, ok := user["email"]; ok {
+		t.Errorf("в ответе про аккаунт не должно быть почты: %v", user)
+	}
 
-	// Второй без приглашения не проходит: регистрация закрыта.
-	st, _ = req(t, srv, "POST", "/api/auth/register", "",
+	st, body = req(t, srv, "POST", "/api/auth/register", "",
 		map[string]any{"consent": true, "username": "vasilisa", "password": "parol1234"})
-	if st != http.StatusForbidden {
-		t.Errorf("регистрация без приглашения: %d, ждали 403", st)
-	}
-}
-
-func TestInviteLetsFriendIn(t *testing.T) {
-	srv := newTestServerWith(t, func(c *config.Config) { c.AllowRegistration = false })
-	deniz := register(t, srv, "deniz", "parol1234")
-
-	st, inv := req(t, srv, "POST", "/api/invites", deniz, map[string]any{"note": "Василисе"})
 	if st != http.StatusCreated {
-		t.Fatalf("выдача приглашения: %d %v", st, inv)
-	}
-	code, _ := inv["code"].(string)
-	url, _ := inv["url"].(string)
-	if code == "" || !strings.Contains(url, "#invite=") {
-		t.Fatalf("код или ссылка пустые: %v", inv)
-	}
-	// Код едет во фрагменте: в логах Caddy он осесть не должен.
-	if strings.Contains(url, "?invite=") {
-		t.Errorf("код обязан быть во фрагменте, а не в строке запроса: %s", url)
-	}
-
-	st, body := req(t, srv, "POST", "/api/auth/register", "",
-		map[string]any{"consent": true, "username": "vasilisa", "password": "parol1234", "invite": code})
-	if st != http.StatusCreated {
-		t.Fatalf("регистрация по приглашению: %d %v", st, body)
+		t.Fatalf("регистрация второго: %d %v", st, body)
 	}
 	if user, _ := body["user"].(map[string]any); user["is_admin"] != false {
-		t.Errorf("пришедший по приглашению не должен быть админом: %v", user)
-	}
-
-	// Код одноразовый: вторым человеком он уже не воспользуется.
-	st, _ = req(t, srv, "POST", "/api/auth/register", "",
-		map[string]any{"consent": true, "username": "petya", "password": "parol1234", "invite": code})
-	if st != http.StatusForbidden {
-		t.Errorf("повторное использование кода: %d, ждали 403", st)
-	}
-
-	// В списке видно, что приглашение потрачено и кем.
-	st, list := req(t, srv, "GET", "/api/invites", deniz, nil)
-	if st != http.StatusOK {
-		t.Fatalf("список приглашений: %d %v", st, list)
-	}
-	invites, _ := list["invites"].([]any)
-	if len(invites) != 1 {
-		t.Fatalf("в списке %d приглашений, ждали одно: %v", len(invites), list)
-	}
-	only, _ := invites[0].(map[string]any)
-	if only["state"] != "used" || only["used_by"] != "vasilisa" {
-		t.Errorf("приглашение должно быть потрачено Василисой: %v", only)
-	}
-	// И код в списке не показывается — его в базе нет.
-	if _, ok := only["code"]; ok {
-		t.Error("список не должен отдавать коды: в базе только хеши")
-	}
-
-	// Потраченное приглашение не отзывается: это уже история.
-	id := fmt.Sprintf("%v", only["id"])
-	if st, _ := req(t, srv, "DELETE", "/api/invites/"+id, deniz, nil); st != http.StatusConflict {
-		t.Errorf("отзыв потраченного приглашения: %d, ждали 409", st)
+		t.Errorf("второй не должен быть админом: %v", user)
 	}
 }
 
-// Просроченное приглашение — просто бумажка: и по нему не войти, и в списке
-// оно видно как просроченное.
-func TestExpiredInviteIsNoGood(t *testing.T) {
-	srv := newTestServerWith(t, func(c *config.Config) {
-		c.AllowRegistration = false
-		c.InviteTTL = -time.Minute
-	})
+// Приглашений в облаке больше нет — ни адресов, ни таблицы, ни колонки почты.
+func TestInvitesAndEmailAreGone(t *testing.T) {
+	srv, db := newTestServerDB(t, nil)
 	deniz := register(t, srv, "deniz", "parol1234")
 
-	st, inv := req(t, srv, "POST", "/api/invites", deniz, nil)
-	if st != http.StatusCreated {
-		t.Fatalf("выдача приглашения: %d %v", st, inv)
+	for _, path := range []string{"/api/invites", "/api/invites/1"} {
+		if st, _ := req(t, srv, "GET", path, deniz, nil); st != http.StatusNotFound {
+			t.Errorf("GET %s: %d, ждали 404", path, st)
+		}
 	}
-	code, _ := inv["code"].(string)
-
-	if st, _ := req(t, srv, "POST", "/api/auth/register", "",
-		map[string]any{"consent": true, "username": "vasilisa", "password": "parol1234", "invite": code}); st != http.StatusForbidden {
-		t.Errorf("регистрация по просроченному коду: %d, ждали 403", st)
+	if db.Migrator().HasTable("invites") {
+		t.Error("таблица приглашений должна была исчезнуть")
 	}
-	_, list := req(t, srv, "GET", "/api/invites", deniz, nil)
-	invites, _ := list["invites"].([]any)
-	if len(invites) != 1 {
-		t.Fatalf("в списке %d приглашений: %v", len(invites), list)
-	}
-	only, _ := invites[0].(map[string]any)
-	if only["state"] != "expired" {
-		t.Errorf("состояние просроченного приглашения: %v", only["state"])
-	}
-	// Отозвать просроченное можно — им всё равно никто не воспользуется.
-	if st, _ := req(t, srv, "DELETE", fmt.Sprintf("/api/invites/%v", only["id"]), deniz, nil); st != http.StatusOK {
-		t.Errorf("отзыв просроченного приглашения: %d", st)
+	if db.Migrator().HasColumn(&models.User{}, "email") {
+		t.Error("колонка почты должна была исчезнуть")
 	}
 }
 
-// Приглашения — дело хозяина: остальным туда нельзя.
-func TestInvitesAreAdminOnly(t *testing.T) {
-	srv := newTestServer(t) // регистрация открыта: второго заводим свободно
+// accountID — номер аккаунта по его ключу: списку хозяина и действиям над
+// учёткой нужен номер, а наружу его отдаёт только /api/me.
+func accountID(t *testing.T, srv *httptest.Server, token string) string {
+	t.Helper()
+	st, body := req(t, srv, "GET", "/api/me", token, nil)
+	if st != http.StatusOK {
+		t.Fatalf("кто я: %d %v", st, body)
+	}
+	user, _ := body["user"].(map[string]any)
+	return fmt.Sprintf("%v", user["id"])
+}
+
+// Хозяин видит все учётные записи и может убрать лишнюю — вместе со всем,
+// что человек написал.
+func TestAdminDeletesAccount(t *testing.T) {
+	srv, db := newTestServerDB(t, nil)
+	deniz := register(t, srv, "deniz", "parol1234")
+	vasya := register(t, srv, "vasilisa", "parol1234")
+	req(t, srv, "PUT", "/api/docs/vasilisa/дневник", vasya, map[string]any{"content": "привет"})
+
+	st, list := req(t, srv, "GET", "/api/admin/users", deniz, nil)
+	if st != http.StatusOK {
+		t.Fatalf("список аккаунтов: %d %v", st, list)
+	}
+	users, _ := list["users"].([]any)
+	if len(users) != 2 {
+		t.Fatalf("в списке %d аккаунтов, ждали два: %v", len(users), list)
+	}
+	first, _ := users[0].(map[string]any)
+	if first["username"] != "deniz" || first["me"] != true || first["is_admin"] != true {
+		t.Errorf("хозяин в списке выглядит не так: %v", first)
+	}
+	second, _ := users[1].(map[string]any)
+	if second["username"] != "vasilisa" || second["docs"] != float64(1) {
+		t.Errorf("Василиса в списке выглядит не так: %v", second)
+	}
+
+	// Себя удалять нечем: хозяин — тот, кто ведёт учётные записи.
+	if st, _ := req(t, srv, "DELETE", "/api/admin/users/"+accountID(t, srv, deniz), deniz, nil); st != http.StatusBadRequest {
+		t.Errorf("удаление себя: %d, ждали 400", st)
+	}
+
+	if st, _ := req(t, srv, "DELETE", "/api/admin/users/"+accountID(t, srv, vasya), deniz, nil); st != http.StatusOK {
+		t.Fatalf("удаление учётки: %d", st)
+	}
+	// Учётка ушла целиком: и вход, и написанное.
+	if st, _ := req(t, srv, "GET", "/api/me", vasya, nil); st != http.StatusUnauthorized {
+		t.Errorf("ключ удалённого: %d, ждали 401", st)
+	}
+	if st, _ := req(t, srv, "GET", "/api/docs/vasilisa/дневник", deniz, nil); st != http.StatusNotFound {
+		t.Errorf("документ удалённого: %d, ждали 404", st)
+	}
+	var docs int64
+	db.Unscoped().Model(&models.Doc{}).Where("path = ?", "дневник").Count(&docs)
+	if docs != 0 {
+		t.Errorf("документы удалённого остались: %d", docs)
+	}
+}
+
+// Учётные записи — дело хозяина: остальным туда нельзя.
+func TestAdminRoutesAreAdminOnly(t *testing.T) {
+	srv := newTestServer(t)
 	deniz := register(t, srv, "deniz", "parol1234")
 	vasya := register(t, srv, "vasilisa", "parol1234")
 
-	if st, _ := req(t, srv, "GET", "/api/invites", vasya, nil); st != http.StatusForbidden {
-		t.Errorf("чужой смотрит список приглашений: %d, ждали 403", st)
+	if st, _ := req(t, srv, "GET", "/api/admin/users", vasya, nil); st != http.StatusForbidden {
+		t.Errorf("чужой смотрит список аккаунтов: %d, ждали 403", st)
 	}
-	if st, _ := req(t, srv, "POST", "/api/invites", vasya, nil); st != http.StatusForbidden {
-		t.Errorf("чужой выписывает приглашение: %d, ждали 403", st)
+	if st, _ := req(t, srv, "DELETE", "/api/admin/users/1", vasya, nil); st != http.StatusForbidden {
+		t.Errorf("чужой удаляет учётку: %d, ждали 403", st)
 	}
-	if st, _ := req(t, srv, "GET", "/api/invites", "", nil); st != http.StatusUnauthorized {
-		t.Errorf("список приглашений без входа: %d, ждали 401", st)
+	if st, _ := req(t, srv, "GET", "/api/admin/users", "", nil); st != http.StatusUnauthorized {
+		t.Errorf("список аккаунтов без входа: %d, ждали 401", st)
 	}
-	if st, _ := req(t, srv, "GET", "/api/invites", deniz, nil); st != http.StatusOK {
-		t.Errorf("хозяин смотрит список приглашений: %d", st)
+	if st, _ := req(t, srv, "GET", "/api/admin/users", deniz, nil); st != http.StatusOK {
+		t.Errorf("хозяин смотрит список аккаунтов: %d", st)
+	}
+}
+
+// Выгнать — значит выгнать: и из браузеров, и из скриптов. Оставить ключи
+// живыми значило бы выставить человека за дверь, оставив ему ключ.
+func TestAdminKicksAccount(t *testing.T) {
+	srv := newTestServer(t)
+	deniz := register(t, srv, "deniz", "parol1234")
+	vasya := register(t, srv, "vasilisa", "parol1234")
+
+	st, key, _ := do(t, srv, "POST", "/api/tokens", map[string]any{"label": "скрипт"}, opts{token: vasya})
+	if st != http.StatusCreated {
+		t.Fatalf("выдача ключа: %d %v", st, key)
+	}
+	apiKey, _ := key["token"].(string)
+
+	id := accountID(t, srv, vasya)
+	st, body, _ := do(t, srv, "POST", "/api/admin/users/"+id+"/logout", nil, opts{token: deniz})
+	if st != http.StatusOK {
+		t.Fatalf("выгнать: %d %v", st, body)
+	}
+	if st, _ := req(t, srv, "GET", "/api/me", vasya, nil); st != http.StatusUnauthorized {
+		t.Errorf("сессия выгнанного жива: %d, ждали 401", st)
+	}
+	if st, _ := req(t, srv, "GET", "/api/me", apiKey, nil); st != http.StatusUnauthorized {
+		t.Errorf("ключ выгнанного жив: %d, ждали 401", st)
+	}
+}
+
+// Права хозяина раздаются и отзываются — но хозяин в облаке остаётся
+// всегда. Держится это на одном отказе: себя разжаловать нельзя, а кто может
+// разжаловать другого, тот сам хозяин, то есть в облаке нас двое.
+func TestAdminGrantsAndRevokesRights(t *testing.T) {
+	srv := newTestServer(t)
+	deniz := register(t, srv, "deniz", "parol1234")
+	vasya := register(t, srv, "vasilisa", "parol1234")
+	denizID := accountID(t, srv, deniz)
+	vasyaID := accountID(t, srv, vasya)
+
+	if st, _, _ := do(t, srv, "POST", "/api/admin/users/"+vasyaID+"/admin",
+		map[string]any{"admin": true}, opts{token: deniz}); st != http.StatusOK {
+		t.Fatalf("назначение хозяином: %d", st)
+	}
+	if st, _ := req(t, srv, "GET", "/api/admin/users", vasya, nil); st != http.StatusOK {
+		t.Errorf("назначенный не видит список: %d", st)
+	}
+
+	// Себя разжаловать нельзя: тот, кто ведёт учётные записи, не должен
+	// потерять права одним нажатием — иначе в облаке не останется хозяина.
+	if st, _, _ := do(t, srv, "POST", "/api/admin/users/"+denizID+"/admin",
+		map[string]any{"admin": false}, opts{token: deniz}); st != http.StatusBadRequest {
+		t.Errorf("разжалование себя: %d, ждали 400", st)
+	}
+	// А другого — можно, и он сразу теряет доступ к учётным записям.
+	if st, _, _ := do(t, srv, "POST", "/api/admin/users/"+vasyaID+"/admin",
+		map[string]any{"admin": false}, opts{token: deniz}); st != http.StatusOK {
+		t.Errorf("разжалование назначенного: %d", st)
+	}
+	if st, _ := req(t, srv, "GET", "/api/admin/users", vasya, nil); st != http.StatusForbidden {
+		t.Errorf("разжалованный видит список: %d, ждали 403", st)
+	}
+}
+
+// Общий предел на /api: один адрес не заваливает облако запросами.
+func TestRateLimitOnAPI(t *testing.T) {
+	srv := newTestServerWith(t, func(c *config.Config) {
+		c.RateLimit = 5
+		c.RateWindow = time.Minute
+	})
+	for i := 0; i < 5; i++ {
+		if st, _ := req(t, srv, "GET", "/api/health", "", nil); st != http.StatusOK {
+			t.Fatalf("запрос %d: %d, ждали 200", i+1, st)
+		}
+	}
+	st, body, resp := do(t, srv, "GET", "/api/health", nil, opts{})
+	if st != http.StatusTooManyRequests {
+		t.Fatalf("шестой запрос: %d %v, ждали 429", st, body)
+	}
+	// Отказ должен говорить, когда возвращаться: иначе скрипт будет долбить
+	// наугад.
+	if resp.Header.Get("Retry-After") == "" {
+		t.Error("в отказе нет Retry-After")
+	}
+	if _, ok := body["error"]; !ok {
+		t.Errorf("отказ без объяснения: %v", body)
+	}
+}
+
+// Отдельный предел на то, что меняет данные: читать можно подряд, писать
+// пачками — нет.
+func TestWriteLimit(t *testing.T) {
+	srv := newTestServerWith(t, func(c *config.Config) {
+		c.RateLimit = 1000
+		c.WriteLimit = 3
+		c.WriteWindow = time.Minute
+	})
+	// Регистрация — тоже запись, и она тратит первое место в окне.
+	deniz := register(t, srv, "deniz", "parol1234")
+	if st, _ := req(t, srv, "PUT", "/api/docs/deniz/раз", deniz, map[string]any{"content": "а"}); st != http.StatusOK {
+		t.Fatalf("первый документ: %d", st)
+	}
+	if st, _ := req(t, srv, "PUT", "/api/docs/deniz/два", deniz, map[string]any{"content": "б"}); st != http.StatusOK {
+		t.Fatalf("второй документ: %d", st)
+	}
+	if st, _ := req(t, srv, "PUT", "/api/docs/deniz/три", deniz, map[string]any{"content": "в"}); st != http.StatusTooManyRequests {
+		t.Errorf("третья запись сверх предела: %d, ждали 429", st)
+	}
+	// Чтение при этом работает: предел на запись не должен мешать читать.
+	if st, _ := req(t, srv, "GET", "/api/docs/deniz/раз", deniz, nil); st != http.StatusOK {
+		t.Errorf("чтение под пределом на запись: %d", st)
+	}
+}
+
+// О новой регистрации хозяин узнаёт из ntfy: регистрация открыта, и это
+// единственная новость, которую стоит рассказывать сразу.
+func TestRegistrationNotifiesOwner(t *testing.T) {
+	got := make(chan []byte, 1)
+	ntfy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		select {
+		case got <- body:
+		default:
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ntfy.Close()
+
+	srv := newTestServerWith(t, func(c *config.Config) {
+		c.NtfyURL = ntfy.URL
+		c.NtfyTopic = "облако"
+	})
+	register(t, srv, "deniz", "parol1234")
+
+	select {
+	case body := <-got:
+		var msg map[string]any
+		if err := json.Unmarshal(body, &msg); err != nil {
+			t.Fatalf("уведомление не разобралось: %v (%s)", err, body)
+		}
+		if msg["topic"] != "облако" {
+			t.Errorf("тема в уведомлении: %v", msg["topic"])
+		}
+		if text, _ := msg["message"].(string); !strings.Contains(text, "deniz") {
+			t.Errorf("в уведомлении нет имени: %v", msg["message"])
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("уведомление в ntfy не пришло")
 	}
 }
 
@@ -788,7 +931,7 @@ func TestRegistrationRules(t *testing.T) {
 	if st, _ := req(t, srv, "POST", "/api/auth/register", "", map[string]any{"consent": true, "username": "deniz", "password": "parol1234"}); st != http.StatusConflict {
 		t.Errorf("повтор имени: %d, ждали 409", st)
 	}
-	// Вход по имени и по почте, пароль проверяется.
+	// Вход по имени: почты у аккаунта нет, вход один.
 	if st, _ := req(t, srv, "POST", "/api/auth/login", "", map[string]any{"login": "deniz", "password": "неверный"}); st != http.StatusUnauthorized {
 		t.Errorf("неверный пароль: %d, ждали 401", st)
 	}

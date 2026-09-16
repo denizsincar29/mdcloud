@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -67,16 +68,20 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/comments/{owner}/{path...}", s.postComment)
 	mux.HandleFunc("DELETE /api/comments/{id}", s.requireUser(s.deleteComment))
 
-	mux.HandleFunc("GET /api/invites", s.requireAdmin(s.listInvites))
-	mux.HandleFunc("POST /api/invites", s.requireAdmin(s.createInvite))
-	mux.HandleFunc("DELETE /api/invites/{id}", s.requireAdmin(s.deleteInvite))
+	// Хозяйское: учётные записи облака. Приглашений здесь больше нет —
+	// регистрация открыта всем, а хозяин видит, кто пришёл, и решает,
+	// оставлять ли учётку.
+	mux.HandleFunc("GET /api/admin/users", s.requireAdmin(s.listAccounts))
+	mux.HandleFunc("DELETE /api/admin/users/{id}", s.requireAdmin(s.deleteAccount))
+	mux.HandleFunc("POST /api/admin/users/{id}/admin", s.requireAdmin(s.setAccountAdmin))
+	mux.HandleFunc("POST /api/admin/users/{id}/logout", s.requireAdmin(s.kickAccount))
 
 	// Локальная разработка: отдать web/ напрямую, чтобы не поднимать Caddy.
 	if dir := strings.TrimSpace(os.Getenv("MDCLOUD_STATIC_DIR")); dir != "" {
 		mux.Handle("GET /", http.FileServer(http.Dir(dir)))
 	}
 
-	return s.recoverer(s.cors(s.csrf(s.staticHeaders(mux))))
+	return s.recoverer(s.cors(s.csrf(s.rateLimit(s.staticHeaders(mux)))))
 }
 
 // ---------------------------------------------------------------- middleware
@@ -170,6 +175,50 @@ func (s *Server) csrf(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// rateLimit держит два предела на /api: общий — чтобы один адрес не заваливал
+// облако запросами, и отдельный на то, что меняет данные.
+//
+// Пределы разные не для красоты: читать документы можно помногу и подряд
+// (страница открывает документ, комментарии, шаринг — это всё чтение), а
+// писать пачками незачем: и документы, и ключи заводят руками. Отказ — 429 с
+// Retry-After, чтобы скрипт знал, когда возвращаться.
+//
+// Счётчик в памяти процесса: облако живёт одним узлом, и общий счётчик в базе
+// был бы лишней точкой отказа.
+func (s *Server) rateLimit(next http.Handler) http.Handler {
+	writes := map[string]bool{
+		http.MethodPost: true, http.MethodPut: true,
+		http.MethodPatch: true, http.MethodDelete: true,
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasPrefix(r.URL.Path, "/api/") {
+			next.ServeHTTP(w, r)
+			return
+		}
+		ip := clientIP(r)
+		if s.cfg.RateLimit > 0 &&
+			!s.lim.allow("api:"+ip, s.cfg.RateLimit, s.cfg.RateWindow) {
+			retryAfter(w, s.cfg.RateWindow)
+			writeErr(w, http.StatusTooManyRequests, "слишком много запросов — подождите немного")
+			return
+		}
+		if writes[r.Method] && s.cfg.WriteLimit > 0 &&
+			!s.lim.allow("write:"+ip, s.cfg.WriteLimit, s.cfg.WriteWindow) {
+			retryAfter(w, s.cfg.WriteWindow)
+			writeErr(w, http.StatusTooManyRequests,
+				"слишком часто меняете документы — подождите немного")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func retryAfter(w http.ResponseWriter, window time.Duration) {
+	if secs := int(window.Seconds()); secs > 0 {
+		w.Header().Set("Retry-After", strconv.Itoa(secs))
+	}
 }
 
 // ---------------------------------------------------------------- авторизация

@@ -25,13 +25,11 @@ const (
 
 // User — владелец документов и автор комментариев.
 //
-// Email — указатель, а не пустая строка: у уникального индекса NULL-ов
-// может быть сколько угодно, а «пустая строка» — это одно конкретное
-// значение, и второй пользователь без почты в него бы упёрся.
+// Почты у аккаунта нет: вход по юзернейму, а письма облако не шлёт — значит,
+// спрашивать адрес незачем. Не собираем то, что не используем.
 type User struct {
 	ID           uint      `gorm:"primarykey" json:"id"`
 	Username     string    `gorm:"uniqueIndex;size:64;not null" json:"username"`
-	Email        *string   `gorm:"uniqueIndex;size:255" json:"-"`
 	PasswordHash string    `gorm:"not null" json:"-"`
 	DisplayName  string    `gorm:"size:120" json:"display_name"`
 	IsAdmin      bool      `gorm:"default:false" json:"is_admin"`
@@ -44,14 +42,6 @@ type User struct {
 	// подтвердить: время принятия и редакция политики хранятся у аккаунта.
 	ConsentAt     *time.Time `json:"-"`
 	ConsentPolicy string     `gorm:"size:32" json:"-"`
-}
-
-// EmailString — почта строкой (пусто, если её нет).
-func (u *User) EmailString() string {
-	if u == nil || u.Email == nil {
-		return ""
-	}
-	return *u.Email
 }
 
 // Name — как подписывать этого пользователя в комментариях.
@@ -131,28 +121,6 @@ type Comment struct {
 	IPHash    string    `gorm:"size:64;index" json:"-"` // sha256(соль+IP), сырой IP не храним
 	CreatedAt time.Time `json:"created_at"`
 }
-
-// Invite — одноразовое приглашение в облако.
-//
-// В базе лежит только хеш кода: посмотреть приглашение в дампе нельзя, а
-// сам код показывается один раз, в момент создания. Отсюда же следует, что
-// «напомнить ссылку» невозможно — можно только выдать новую.
-type Invite struct {
-	ID        uint       `gorm:"primarykey" json:"id"`
-	CodeHash  string     `gorm:"uniqueIndex;size:64;not null" json:"-"`
-	Note      string     `gorm:"size:120" json:"note"` // кому выдали: «Маше»
-	CreatedBy uint       `gorm:"index;not null" json:"created_by"`
-	UsedBy    *uint      `gorm:"index" json:"used_by,omitempty"`
-	UsedAt    *time.Time `json:"used_at,omitempty"`
-	ExpiresAt time.Time  `gorm:"index;not null" json:"expires_at"`
-	CreatedAt time.Time  `json:"created_at"`
-}
-
-// Spent сообщает, что приглашение уже использовано.
-func (i *Invite) Spent() bool { return i.UsedAt != nil }
-
-// Expired сообщает, что срок приглашения вышел.
-func (i *Invite) Expired(now time.Time) bool { return now.After(i.ExpiresAt) }
 
 // Session — токен входа. В БД лежит только его хеш: утечка дампа не отдаёт
 // готовые сессии. Браузер получает токен httpOnly-кукой, скрипты — обычным

@@ -1,8 +1,7 @@
-// Package auth — пароли, токены сессий и коды приглашений.
+// Package auth — пароли и токены сессий.
 //
-// Токен — это случайные 32 байта в base64url, код приглашения — 16. В базе
-// лежит только sha256 от обоих: дамп БД не даёт ни войти, ни воспользоваться
-// чужим приглашением.
+// Токен — это случайные 32 байта в base64url; в базе лежит только sha256 от
+// него, поэтому дамп БД не даёт ни войти, ни продлить чужую сессию.
 package auth
 
 import (
@@ -37,18 +36,6 @@ func NewToken() (token, hash string, err error) {
 	}
 	token = base64.RawURLEncoding.EncodeToString(buf)
 	return token, HashToken(token), nil
-}
-
-// NewCode выдаёт код приглашения: ссылка на регистрацию и есть этот код.
-// Он сгорает при первом использовании, так что 16 байт здесь с большим
-// запасом — подбирать его перебором некому.
-func NewCode() (code, hash string, err error) {
-	buf := make([]byte, 16)
-	if _, err = rand.Read(buf); err != nil {
-		return "", "", fmt.Errorf("генерация кода: %w", err)
-	}
-	code = base64.RawURLEncoding.EncodeToString(buf)
-	return code, HashToken(code), nil
 }
 
 // HashToken — то, что реально лежит в таблице sessions.

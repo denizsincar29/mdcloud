@@ -20,16 +20,28 @@ type Config struct {
 	BaseURL           string        // публичный адрес облака, https://mdcloud.example
 	EditorURL         string        // публичный адрес редактора mathmd
 	AllowedOrigins    []string      // кому разрешён CORS к /api (сайты редактора/облака)
-	AllowRegistration bool          // открытая регистрация без приглашения
 	CookieName        string        // имя куки сессии
 	CookieDomain      string        // домен куки: пусто — только этот хост
 	CookieSecure      bool          // слать куку только по https (в бою — да)
 	SessionTTL        time.Duration // срок жизни токена сессии
-	InviteTTL         time.Duration // срок жизни приглашения по умолчанию
 	IPSalt            string        // соль для хеша IP: сырые адреса в БД не пишем
 	CommentLimit      int           // сколько комментариев с одного IP за окно
 	CommentWindow     time.Duration // длина окна для CommentLimit
 	MaxDocBytes       int           // максимальный размер markdown-документа
+
+	// Рейтлимиты. Общий предел стоит на всех запросах к /api, отдельный —
+	// на те, что что-то меняют: читать документы можно помногу, а писать
+	// пачками незачем.
+	RateLimit   int           // сколько запросов к /api с одного адреса за окно (0 — без предела)
+	RateWindow  time.Duration // длина окна для RateLimit
+	WriteLimit  int           // сколько изменяющих запросов с одного адреса за окно (0 — без предела)
+	WriteWindow time.Duration // длина окна для WriteLimit
+
+	// Уведомления хозяину в ntfy: облако шлёт туда короткую строку о новой
+	// регистрации. Пусто в NtfyTopic — уведомления выключены.
+	NtfyURL   string // адрес сервера ntfy
+	NtfyTopic string // тема, в которую писать
+	NtfyToken string // ключ доступа к закрытой теме (необязательно)
 }
 
 // Load читает окружение и валидирует обязательные поля.
@@ -40,15 +52,20 @@ func Load() (*Config, error) {
 		BaseURL:           env("MDCLOUD_BASE_URL", ""),
 		EditorURL:         env("MDCLOUD_EDITOR_URL", "https://mathmd.denizsincar.ru"),
 		AllowedOrigins:    splitList(env("MDCLOUD_ALLOWED_ORIGINS", "")),
-		AllowRegistration: envBool("MDCLOUD_ALLOW_REGISTRATION", false),
 		CookieName:        env("MDCLOUD_COOKIE_NAME", "mdcloud_sid"),
 		CookieDomain:      strings.TrimPrefix(env("MDCLOUD_COOKIE_DOMAIN", ""), "."),
 		SessionTTL:        envDur("MDCLOUD_SESSION_TTL", 30*24*time.Hour),
-		InviteTTL:         envDur("MDCLOUD_INVITE_TTL", 14*24*time.Hour),
 		IPSalt:            env("MDCLOUD_IP_SALT", ""),
 		CommentLimit:      envInt("MDCLOUD_COMMENT_LIMIT", 10),
 		CommentWindow:     envDur("MDCLOUD_COMMENT_WINDOW", 10*time.Minute),
 		MaxDocBytes:       envInt("MDCLOUD_MAX_DOC_BYTES", 2<<20),
+		RateLimit:         envInt("MDCLOUD_RATE_LIMIT", 600),
+		RateWindow:        envDur("MDCLOUD_RATE_WINDOW", time.Minute),
+		WriteLimit:        envInt("MDCLOUD_WRITE_LIMIT", 120),
+		WriteWindow:       envDur("MDCLOUD_WRITE_WINDOW", 10*time.Minute),
+		NtfyURL:           env("MDCLOUD_NTFY_URL", "https://ntfy.sh"),
+		NtfyTopic:         env("MDCLOUD_NTFY_TOPIC", ""),
+		NtfyToken:         env("MDCLOUD_NTFY_TOKEN", ""),
 	}
 	if c.DatabaseURL == "" {
 		return nil, fmt.Errorf("MDCLOUD_DATABASE_URL (или DATABASE_URL) не задан")

@@ -14,7 +14,7 @@
     <button id="account-toggle" type="button" aria-expanded="false" aria-controls="account-menu" hidden>Учётная запись</button>
     <div id="account-menu" hidden>
       <button id="tokens-toggle" type="button" hidden>API-токены</button>
-      <button id="invites-toggle" type="button" hidden>Приглашения</button>
+      <button id="admin-toggle" type="button" hidden>Учётные записи</button>
       <button id="logout" type="button">Выйти</button>
     </div>
     <button id="login-toggle" type="button">Войти</button>
@@ -27,7 +27,7 @@
   <section id="login" hidden aria-labelledby="login-h">
     <h1 id="login-h">Вход</h1>
     <form id="login-form">
-      <label for="login-name">Логин или почта</label>
+      <label for="login-name">Логин</label>
       <input id="login-name" name="login" autocomplete="username" required>
       <label for="login-pass">Пароль</label>
       <input id="login-pass" name="password" type="password" autocomplete="current-password" required>
@@ -44,8 +44,6 @@
     <form id="register-form">
       <label for="register-name">Логин</label>
       <input id="register-name" name="username" autocomplete="username" required>
-      <label for="register-mail">Почта — не обязательно</label>
-      <input id="register-mail" name="email" type="email" autocomplete="email">
       <label for="register-pass">Пароль</label>
       <input id="register-pass" name="password" type="password" autocomplete="new-password" required>
       <label for="register-consent" class="consent-label">
@@ -61,24 +59,18 @@
     </form>
   </section>
 
-  <section id="invites" hidden aria-labelledby="invites-h">
-    <h1 id="invites-h">Приглашения</h1>
-    <p class="meta">Приглашение пускает одного человека. Ссылка показывается один раз — в облаке
-      хранится только её отпечаток, и посмотреть приглашение потом не получится. Отправьте
-      ссылку тому, кого приглашаете: он откроет её и зарегистрируется.</p>
-    <form id="invite-form">
-      <label for="invite-note">Кому — для памяти</label>
-      <input id="invite-note" name="note" maxlength="120" placeholder="Маше">
-      <label for="invite-days">Сколько дней действует</label>
-      <input id="invite-days" name="days" type="number" min="1" max="365" value="14">
-      <button type="submit">Выписать приглашение</button>
-    </form>
-    <p id="invite-fresh" hidden>
-      <label for="invite-link">Ссылка для друга</label>
-      <input id="invite-link" readonly>
+  <section id="admin" hidden aria-labelledby="admin-h">
+    <h1 id="admin-h">Учётные записи</h1>
+    <p class="meta">Регистрация в облаке открыта: завестись может кто угодно, а учётные записи
+      ведёте вы. Здесь видно, кто пришёл, сколько написал и заходил ли вообще. Строка — как в
+      списке документов: кнопка «Действия» в ней и клавиша Applications на ней открывают меню,
+      где учётку можно выгнать, сделать хозяином или удалить. Удаление уносит всё, что человек
+      написал, — и вернуть это будет нечем.</p>
+    <ul id="accounts-list" class="doclist"></ul>
+    <p class="actions">
+      <button id="admin-refresh" type="button">Обновить список</button>
+      <button id="admin-back" type="button">К документам</button>
     </p>
-    <ul id="invites-list" class="doclist"></ul>
-    <p class="actions"><button id="invites-back" type="button">К документам</button></p>
   </section>
 
   <section id="tokens" hidden aria-labelledby="tokens-h">

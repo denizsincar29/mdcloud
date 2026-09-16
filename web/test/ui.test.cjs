@@ -1,6 +1,6 @@
 // Проверка страницы облака без браузера: jsdom + подставной fetch.
 // Смотрим то, что руками не проверить: что кнопки действительно ходят в API
-// и что экраны переключаются — регистрация, приглашения, вход по ссылке.
+// и что экраны переключаются — регистрация, учётные записи, меню действий.
 //
 // Запуск: npm install -g jsdom && node web/test/ui.test.cjs
 
@@ -50,9 +50,7 @@ function makeApi(overrides = {}) {
     "POST /api/auth/login": () => ({ status: 200, body: { user: { username: "deniz", is_admin: true } } }),
     "POST /api/auth/logout": () => ({ status: 200, body: { ok: true } }),
     "GET /api/docs/deniz": () => ({ status: 200, body: { docs: [] } }),
-    "POST /api/invites": () => ({ status: 201, body: { id: 7, note: "Маше", code: "KOD", url: "https://mdcloud.denizsincar.ru/#invite=KOD" } }),
-    "GET /api/invites": () => ({ status: 200, body: { invites: [{ id: 7, note: "Маше", state: "active", created_at: "2026-09-15T10:00:00Z", expires_at: "2026-09-29T10:00:00Z" }] } }),
-    "DELETE /api/invites/7": () => ({ status: 200, body: { ok: true } }),
+    "GET /api/admin/users": () => ({ status: 200, body: { users: [] } }),
     ...overrides,
   };
   return {
@@ -74,6 +72,21 @@ function makeApi(overrides = {}) {
       };
     },
   };
+}
+
+// ACCOUNTS — две учётные записи для заглушки: хозяин (он же «я») и гость,
+// который ещё не заходил и ничего не написал.
+function ACCOUNTS() {
+  return [
+    {
+      id: 1, username: "deniz", display_name: "deniz", is_admin: true, me: true,
+      created_at: "2026-09-01T10:00:00Z", docs: 3, last_login: "2026-09-16T09:00:00Z",
+    },
+    {
+      id: 2, username: "vasilisa", display_name: "vasilisa", is_admin: false, me: false,
+      created_at: "2026-09-15T10:00:00Z", docs: 0,
+    },
+  ];
 }
 
 // boot поднимает страницу: index.html + app.js в одном окне jsdom.
@@ -101,6 +114,14 @@ const submit = (w, form) =>
 const click = (w, el) => el.dispatchEvent(new w.Event("click", { bubbles: true }));
 const key = (w, keyName, init = {}) =>
   w.document.dispatchEvent(new w.KeyboardEvent("keydown", { key: keyName, bubbles: true, cancelable: true, ...init }));
+// Клавиши меню слушает само меню: событие надо слать туда, где стоит фокус,
+// а не в документ — снизу вверх оно до меню не дойдёт.
+const keyOn = (w, target, keyName, init = {}) =>
+  target.dispatchEvent(new w.KeyboardEvent("keydown", { key: keyName, bubbles: true, cancelable: true, ...init }));
+// menuButtons — пункты раскрытого меню: и по ним, и по тому, что в них написано,
+// проверяется всё остальное.
+const menuButtons = (w) => [...w.document.getElementById("row-menu").querySelectorAll("button")];
+const menuItem = (w, re) => menuButtons(w).find((b) => re.test(b.textContent));
 
 async function main() {
   // --- 0. Скрытое должно быть скрыто ------------------------------------------
@@ -149,8 +170,9 @@ async function main() {
     const call = stub.calls.find((c) => c.key === "POST /api/auth/register");
     ok("форма регистрации ушла в API", Boolean(call), JSON.stringify(stub.calls.map((c) => c.key)));
     ok(
-      "в теле регистрации — логин и пароль, без кода",
-      call && call.init.body.includes("deniz") && call.init.body.includes("parol1234") && !call.init.body.includes("invite\":\"K"),
+      "в теле регистрации — только имя, пароль и согласие",
+      call && call.init.body.includes("deniz") && call.init.body.includes("parol1234") &&
+        !/email|invite/.test(call.init.body),
       call && call.init.body
     );
     ok("согласие уехало в теле регистрации", call && call.init.body.includes('"consent":true'), call && call.init.body);
@@ -158,73 +180,174 @@ async function main() {
     ok("кнопка учётной записи появилась", $("account-toggle").hidden === false);
     ok("имя владельца на кнопке", /deniz/.test($("account-toggle").textContent), $("account-toggle").textContent);
     ok("меню учётной записи закрыто", $("account-menu").hidden === true);
-    ok("пункт приглашений есть (хозяин)", $("invites-toggle").hidden === false);
+    ok("пункт учётных записей есть (хозяин)", $("admin-toggle").hidden === false);
   }
 
-  // --- 2. Ссылка-приглашение подставляет код ---------------------------------
+  // --- 2. Почты у аккаунта не спрашивают --------------------------------------
   {
-    const api = makeApi();
-    const { $, w, tick, stub } = await boot({ hash: "#invite=KOD42", api });
-    ok("по ссылке открылась регистрация", !$("register").hidden);
-    // Кода в форме нет: приглашение приезжает ссылкой и едет в теле запроса
-    // само — вставлять руками нечего.
-    ok("поля для кода в форме нет", !w.document.getElementById("register-invite"));
+    const { $, w, tick, stub } = await boot();
+    ok("поля почты в форме нет", !w.document.getElementById("register-mail"));
+
     $("register-name").value = "vasilisa";
     $("register-pass").value = "parol1234";
     $("register-consent").checked = true;
     submit(w, $("register-form"));
     await tick();
     const call = stub.calls.find((c) => c.key === "POST /api/auth/register");
-    ok("код уехал в теле регистрации", call && call.init.body.includes('"invite":"KOD42"'), call && call.init.body);
-    ok("код убран из адреса после регистрации", w.location.hash === "");
+    ok("в теле регистрации нет ни почты, ни кода",
+      call && !/email|invite|pochta/.test(call.init.body), call && call.init.body);
+    ok("в теле имя, пароль и согласие",
+      call && call.init.body.includes('"username":"vasilisa"') &&
+        call.init.body.includes('"password":"parol1234"') &&
+        call.init.body.includes('"consent":true'),
+      call && call.init.body);
   }
 
-  // --- 3. Приглашения: выписать, увидеть, отозвать ---------------------------
+  // --- 3. Учётные записи: список и меню в строке ------------------------------
   {
-    const api = makeApi({ "GET /api/me": () => ({ status: 200, body: { user: { username: "deniz", is_admin: true } } }) });
+    const api = makeApi({
+      "GET /api/me": () => ({ status: 200, body: { user: { username: "deniz", is_admin: true } } }),
+      "GET /api/admin/users": () => ({ status: 200, body: { users: ACCOUNTS() } }),
+    });
     const { $, w, tick, stub } = await boot({ api });
-    ok("вошедший видит свои документы", !$("index").hidden);
 
     click(w, $("account-toggle"));
-    ok("кнопка раскрыла меню", $("account-menu").hidden === false);
-    ok("чтец экрана узнает, что меню раскрыто",
-      $("account-toggle").getAttribute("aria-expanded") === "true",
-      $("account-toggle").getAttribute("aria-expanded"));
-    ok("фокус встал на первый пункт меню",
-      w.document.activeElement === $("tokens-toggle"), w.document.activeElement.id);
-
-    key(w, "Escape");
-    ok("Escape закрыл меню", $("account-menu").hidden === true);
-    ok("фокус вернулся на кнопку",
-      w.document.activeElement === $("account-toggle"), w.document.activeElement.id);
-
-    click(w, $("account-toggle"));
-    click(w, w.document.getElementById("main"));
-    ok("клик в стороне закрыл меню", $("account-menu").hidden === true);
-
-    click(w, $("account-toggle"));
-    click(w, $("invites-toggle"));
+    click(w, $("admin-toggle"));
     await tick();
-    ok("выбор пункта закрыл меню", $("account-menu").hidden === true);
-    ok("открылся раздел приглашений", !$("invites").hidden);
-    ok("список приглашений запрошен", stub.calls.some((c) => c.key === "GET /api/invites"));
-    ok("видно, кому выписали", /Маше/.test($("invites-list").textContent), $("invites-list").textContent);
+    ok("выбор пункта закрыл меню шапки", $("account-menu").hidden === true);
+    ok("открылся раздел учётных записей", !$("admin").hidden);
+    ok("список аккаунтов запрошен", stub.calls.some((c) => c.key === "GET /api/admin/users"));
 
-    $("invite-note").value = "Маше";
-    $("invite-days").value = "14";
-    submit(w, $("invite-form"));
-    await tick();
-    const call = stub.calls.find((c) => c.key === "POST /api/invites");
-    ok("приглашение выписано через API", Boolean(call), JSON.stringify(stub.calls.map((c) => c.key)));
-    ok("ссылка показана", !$("invite-fresh").hidden && $("invite-link").value.includes("#invite="), $("invite-link").value);
-    ok("сказано, что ссылку потом не показать",
-      /показать не получится/.test($("status").textContent), $("status").textContent);
+    const text = $("accounts-list").textContent;
+    ok("видно обоих", /deniz/.test(text) && /vasilisa/.test(text), text);
+    ok("про себя сказано, что это вы и хозяин", /deniz — это вы, хозяин облака/.test(text), text);
+    ok("видно, сколько человек написал", /3 документа/.test(text), text);
+    ok("про того, кто ещё не заходил, сказано прямо", /ни разу не заходил/.test(text), text);
+    ok("кто заходил — видно когда", /заходил /.test(text), text);
 
-    const revoke = [...w.document.querySelectorAll("#invites-list button")][0];
-    ok("у живого приглашения есть кнопка отзыва", Boolean(revoke), $("invites-list").innerHTML);
-    click(w, revoke);
+    const rows = [...$("accounts-list").querySelectorAll("li")];
+    ok("строки — по строке на аккаунт", rows.length === 2, String(rows.length));
+    const trigger = rows[1].querySelector(".menu-trigger");
+    ok("в строке есть кнопка «Действия»", Boolean(trigger));
+    ok("кнопка обещает меню, а не что попало",
+      trigger.getAttribute("aria-haspopup") === "menu" && trigger.getAttribute("aria-expanded") === "false",
+      trigger.getAttribute("aria-haspopup"));
+    ok("подпись кнопки называет аккаунт", /vasilisa/.test(trigger.getAttribute("aria-label")),
+      trigger.getAttribute("aria-label"));
+
+    click(w, trigger);
+    const menu = w.document.getElementById("row-menu");
+    ok("меню раскрылось", Boolean(menu));
+    ok("это меню, а не список кнопок", menu.getAttribute("role") === "menu", menu.getAttribute("role"));
+    ok("меню названо по аккаунту", /vasilisa/.test(menu.getAttribute("aria-label")),
+      menu.getAttribute("aria-label"));
+    ok("кнопка сказала, что меню раскрыто", trigger.getAttribute("aria-expanded") === "true");
+    ok("фокус встал на первый пункт", w.document.activeElement === menu.querySelector("button"),
+      w.document.activeElement.textContent);
+
+    // Себя не удаляют и не разжаловывают — но пункты не прячем: искать их
+    // и не находить хуже, чем увидеть неактивными.
+    click(w, rows[0].querySelector(".menu-trigger"));
+    const own = menuButtons(w).map((b) => b.textContent).join(" | ");
+    ok("про себя сказано, что себя не разжаловать", /Себя разжаловать нельзя/.test(own), own);
+    ok("и что себя не удалить", /Свою учётную запись удалить нельзя/.test(own), own);
+    ok("эти пункты неактивны",
+      w.document.querySelectorAll('#row-menu [aria-disabled="true"]').length === 2,
+      String(w.document.querySelectorAll('#row-menu [aria-disabled="true"]').length));
+    ok("остальные пункты живые", Boolean(menuItem(w, /Выгнать/)));
+
+    keyOn(w, w.document.activeElement, "Escape");
+    ok("Escape закрыл меню", !w.document.getElementById("row-menu"));
+    ok("фокус вернулся на кнопку строки", w.document.activeElement === rows[0].querySelector(".menu-trigger"));
+
+    // Список обновляется по кнопке: облако живёт своей жизнью, и «кто пришёл
+    // за последний час» должно быть видно без перезагрузки страницы.
+    click(w, $("admin-refresh"));
     await tick();
-    ok("отзыв ушёл в API", stub.calls.some((c) => c.key === "DELETE /api/invites/7"), JSON.stringify(stub.calls.map((c) => c.key)));
+    ok("обновление перечитало список",
+      stub.calls.filter((c) => c.key === "GET /api/admin/users").length === 2,
+      JSON.stringify(stub.calls.map((c) => c.key)));
+    ok("сказано, что список обновлён", /обновлён/.test($("status").textContent), $("status").textContent);
+
+    click(w, $("admin-back"));
+    await tick();
+    ok("возврат к документам работает", !$("index").hidden && $("admin").hidden);
+  }
+
+  // --- 3а. Действия над чужой учётной записью ---------------------------------
+  {
+    let accounts = ACCOUNTS();
+    const api = makeApi({
+      "GET /api/me": () => ({ status: 200, body: { user: { username: "deniz", is_admin: true } } }),
+      "GET /api/admin/users": () => ({ status: 200, body: { users: accounts } }),
+      "POST /api/admin/users/2/admin": () => {
+        accounts = [{ ...accounts[0] }, { ...accounts[1], is_admin: true }];
+        return { status: 200, body: { ok: true, is_admin: true } };
+      },
+      "POST /api/admin/users/2/logout": () => ({ status: 200, body: { ok: true, sessions: 2, tokens: 1 } }),
+      "DELETE /api/admin/users/2": () => {
+        accounts = [accounts[0]];
+        return { status: 200, body: { ok: true, username: "vasilisa" } };
+      },
+    });
+    const { $, w, tick, stub } = await boot({ api, hash: "#admin" });
+    ok("адрес #admin открывает раздел сразу", !$("admin").hidden);
+
+    // Сделать хозяином
+    click(w, [...$("accounts-list").querySelectorAll("li")][1].querySelector(".menu-trigger"));
+    click(w, menuItem(w, /Сделать хозяином/));
+    await tick();
+    await tick();
+    const grant = stub.calls.find((c) => c.key === "POST /api/admin/users/2/admin");
+    ok("назначение хозяином ушло в API", Boolean(grant), JSON.stringify(stub.calls.map((c) => c.key)));
+    ok("в теле — назначить", grant && grant.init.body.includes('"admin":true'), grant && grant.init.body);
+    ok("сказано, что человек теперь хозяин", /теперь хозяин/.test($("status").textContent), $("status").textContent);
+    ok("список перечитан после назначения",
+      stub.calls.filter((c) => c.key === "GET /api/admin/users").length === 2);
+    ok("новый хозяин помечен в списке", /vasilisa — хозяин облака/.test($("accounts-list").textContent),
+      $("accounts-list").textContent);
+    click(w, [...$("accounts-list").querySelectorAll("li")][1].querySelector(".menu-trigger"));
+    ok("у хозяина предложено разжалование", Boolean(menuItem(w, /Разжаловать/)),
+      menuButtons(w).map((b) => b.textContent).join(" | "));
+    click(w, menuItem(w, /Разжаловать/));
+    await tick();
+    await tick();
+    const revoke = stub.calls.filter((c) => c.key === "POST /api/admin/users/2/admin").pop();
+    ok("разжалование ушло в API", revoke && revoke.init.body.includes('"admin":false'), revoke && revoke.init.body);
+
+    // Выгнать: закрыть входы и отозвать ключи разом.
+    click(w, [...$("accounts-list").querySelectorAll("li")][1].querySelector(".menu-trigger"));
+    click(w, menuItem(w, /Выгнать/));
+    await tick();
+    ok("выгон ушёл в API", stub.calls.some((c) => c.key === "POST /api/admin/users/2/logout"),
+      JSON.stringify(stub.calls.map((c) => c.key)));
+    ok("сказано, сколько входов и ключей закрыто",
+      /закрыто входов — 2, отозвано ключей — 1/.test($("status").textContent), $("status").textContent);
+
+    // Удаление — с подтверждением и без окна браузера.
+    click(w, [...$("accounts-list").querySelectorAll("li")][1].querySelector(".menu-trigger"));
+    click(w, menuItem(w, /^Удалить учётную запись/));
+    ok("удаление спрошено пунктами меню", /Да, удалить vasilisa/.test(w.document.getElementById("row-menu").textContent),
+      w.document.getElementById("row-menu").textContent);
+    click(w, menuItem(w, /^Отмена/));
+    ok("после отмены ничего не удалено",
+      !stub.calls.some((c) => c.key === "DELETE /api/admin/users/2"),
+      JSON.stringify(stub.calls.map((c) => c.key)));
+
+    click(w, [...$("accounts-list").querySelectorAll("li")][1].querySelector(".menu-trigger"));
+    click(w, menuItem(w, /^Удалить учётную запись/));
+    click(w, menuItem(w, /^Да, удалить vasilisa/));
+    await tick();
+    await tick();
+    ok("удаление ушло в API", stub.calls.some((c) => c.key === "DELETE /api/admin/users/2"),
+      JSON.stringify(stub.calls.map((c) => c.key)));
+    ok("удалённый пропал из списка", !/vasilisa/.test($("accounts-list").textContent),
+      $("accounts-list").textContent);
+    ok("фокус остался в списке, а не потерялся",
+      w.document.activeElement === $("accounts-list").querySelector("li"),
+      w.document.activeElement.tagName);
+    ok("сказано, что учётная запись удалена",
+      /Учётная запись удалена: vasilisa/.test($("status").textContent), $("status").textContent);
   }
 
   // --- 3б. API-токены: выписать, увидеть, отозвать ---------------------------
@@ -280,31 +403,35 @@ async function main() {
   // --- 4. Ошибка сервера показывается текстом --------------------------------
   {
     const api = makeApi({
-      "GET /api/config": () => ({ status: 200, body: { registration: "invite" } }),
-      "POST /api/auth/register": () => ({ status: 403, body: { error: "приглашение не подошло" } }),
+      "GET /api/config": () => ({ status: 200, body: { registration: "open" } }),
+      "POST /api/auth/register": () => ({ status: 409, body: { error: "такое имя уже занято" } }),
     });
     const { $, w, tick } = await boot({ api });
     // На экран регистрации надо сначала попасть: boot открывает вход.
     click(w, $("register-toggle"));
     await tick();
     ok("кнопка регистрации открыла форму", !$("register").hidden);
-    ok("при режиме «по приглашению» сказано открыть ссылку",
-      /ссылк/i.test($("register-hint").textContent), $("register-hint").textContent);
+    ok("сказано, что регистрация открыта",
+      /Регистрация открыта/.test($("register-hint").textContent), $("register-hint").textContent);
     $("register-name").value = "petya";
     $("register-pass").value = "parol1234";
     $("register-consent").checked = true;
     submit(w, $("register-form"));
     await tick();
-    ok("ошибка сервера видна в статусе", /приглашение не подошло/.test($("status").textContent), $("status").textContent);
+    ok("ошибка сервера видна в статусе", /имя уже занято/.test($("status").textContent), $("status").textContent);
     ok("экран регистрации не сменился", !$("register").hidden);
   }
 
-  // --- 5. Закрытая регистрация: кнопки регистрации нет -----------------------
+  // --- 5. Сервер молчит про регистрацию — форма всё равно на месте -----------
   {
-    const api = makeApi({ "GET /api/config": () => ({ status: 200, body: { registration: "closed" } }) });
-    const { $ } = await boot({ api });
-    ok("регистрация закрыта — кнопки нет", $("register-toggle").hidden === true);
-    ok("подсказка про закрытую регистрацию", /закрыта/i.test($("register-hint").textContent), $("register-hint").textContent);
+    const api = makeApi({ "GET /api/config": () => ({ status: 500, body: { error: "база недоступна" } }) });
+    const { $, w, tick } = await boot({ api });
+    ok("без ответа про регистрацию кнопка на месте", $("register-toggle").hidden === false);
+    click(w, $("register-toggle"));
+    await tick();
+    ok("форма регистрации открывается", !$("register").hidden);
+    ok("и сказано, что регистрация открыта",
+      /Регистрация открыта/.test($("register-hint").textContent), $("register-hint").textContent);
   }
 
   // --- 6. Создать документ: путь собирается и уводит в редактор --------------
@@ -370,6 +497,111 @@ async function main() {
 
     click(w, a);
     ok("клик по самой ссылке переход не удваивает", opened.length === 1, JSON.stringify(opened));
+  }
+
+  // --- 8а. Меню действий над документом (APG) --------------------------------
+  {
+    // Документ живёт в «сервере» теста: смена режима из меню перечитывается
+    // списком, и проверять надо ответ сервера, а не собственную надпись.
+    let doc = { path: "lab1", slug: "lab1", title: "Лаба", visibility: "private",
+      updated_at: "2026-09-15T10:00:00Z" };
+    const api = makeApi({
+      "GET /api/me": () => ({ status: 200, body: { user: { username: "deniz", is_admin: true } } }),
+      "GET /api/docs/deniz": () => ({ status: 200, body: { docs: [doc] } }),
+      "PUT /api/docs/deniz/lab1": () => {
+        doc = { ...doc, visibility: "link" };
+        return { status: 200, body: doc };
+      },
+      "DELETE /api/docs/deniz/lab1": () => ({ status: 200, body: { ok: true } }),
+    });
+    const { $, w, tick, stub } = await boot({ api });
+    const li = $("index-list").querySelector("li.folder > ul > li");
+    const trigger = li.querySelector(".menu-trigger");
+    ok("в строке документа есть кнопка «Действия»", Boolean(trigger), $("index-list").innerHTML);
+    ok("кнопка обещает меню", trigger.getAttribute("aria-haspopup") === "menu");
+    ok("подпись кнопки называет документ", /Лаба/.test(trigger.getAttribute("aria-label")),
+      trigger.getAttribute("aria-label"));
+
+    click(w, trigger);
+    const menu = w.document.getElementById("row-menu");
+    ok("меню раскрылось", Boolean(menu));
+    ok("это меню, а не список кнопок", menu.getAttribute("role") === "menu", menu.getAttribute("role"));
+    ok("меню названо по документу", /Лаба/.test(menu.getAttribute("aria-label")), menu.getAttribute("aria-label"));
+    ok("кнопка сказала, что меню раскрыто", trigger.getAttribute("aria-expanded") === "true");
+    const items = menuButtons(w);
+    ok("фокус встал на первый пункт", w.document.activeElement === items[0], w.document.activeElement.textContent);
+    ok("пункты объявлены пунктами меню",
+      items.every((b) => /^menuitem/.test(b.getAttribute("role"))),
+      items.map((b) => b.getAttribute("role")).join(","));
+    ok("режимов доступа три и они переключатели",
+      menu.querySelectorAll('[role="menuitemradio"]').length === 3,
+      String(menu.querySelectorAll('[role="menuitemradio"]').length));
+    const checked = menu.querySelector('[role="menuitemradio"][aria-checked="true"]');
+    ok("текущий режим отмечен", checked && /Приватный/.test(checked.textContent), checked && checked.textContent);
+    ok("в меню одна остановка Tab, а не двадцать",
+      items.filter((b) => b.tabIndex === 0).length === 1,
+      String(items.filter((b) => b.tabIndex === 0).length));
+    ok("разделители объявлены разделителями",
+      menu.querySelectorAll('[role="separator"]').length === 3,
+      String(menu.querySelectorAll('[role="separator"]').length));
+
+    // Стрелки: по кругу, Home и End по краям.
+    keyOn(w, w.document.activeElement, "ArrowDown");
+    ok("стрелка вниз ведёт по пунктам", w.document.activeElement === items[1]);
+    keyOn(w, w.document.activeElement, "End");
+    ok("End ведёт к последнему пункту", w.document.activeElement === items[items.length - 1]);
+    keyOn(w, w.document.activeElement, "ArrowDown");
+    ok("с последнего стрелка уходит на первый по кругу", w.document.activeElement === items[0]);
+    keyOn(w, w.document.activeElement, "Home");
+    ok("Home возвращает к первому", w.document.activeElement === items[0]);
+    keyOn(w, w.document.activeElement, "у");
+    ok("буква переводит к пункту на неё", /Удалить/.test(w.document.activeElement.textContent),
+      w.document.activeElement.textContent);
+
+    keyOn(w, w.document.activeElement, "Escape");
+    ok("Escape закрыл меню", !w.document.getElementById("row-menu"));
+    ok("фокус вернулся на кнопку строки", w.document.activeElement === trigger, w.document.activeElement.tagName);
+    ok("кнопка сказала, что меню закрыто", trigger.getAttribute("aria-expanded") === "false");
+
+    // Applications (она же правая кнопка) на самой строке открывает то же меню:
+    // человек жмёт её на ссылке, а не ищет кнопку.
+    li.dispatchEvent(new w.MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
+    ok("меню открывается и с Applications на строке", Boolean(w.document.getElementById("row-menu")));
+    ok("фокус в этом случае в первом пункте меню",
+      w.document.activeElement === menuButtons(w)[0], w.document.activeElement.tagName);
+    keyOn(w, w.document.activeElement, "Escape");
+    ok("после Escape фокус вернулся на строку списка", w.document.activeElement === li,
+      w.document.activeElement.tagName);
+
+    click(w, trigger);
+    keyOn(w, w.document.activeElement, "Tab");
+    ok("Tab закрывает меню и уводит дальше", !w.document.getElementById("row-menu"));
+
+    // Смена режима из меню: строка помечается на месте, список не перерисовывается —
+    // иначе фокус уехал бы в начало списка, а человек потерял бы место.
+    click(w, trigger);
+    click(w, menuItem(w, /По ссылке/));
+    await tick();
+    const put = stub.calls.find((c) => c.key === "PUT /api/docs/deniz/lab1");
+    ok("смена режима ушла в API", Boolean(put), JSON.stringify(stub.calls.map((c) => c.key)));
+    ok("в теле — новый режим", put && put.init.body.includes('"visibility":"link"'), put && put.init.body);
+    ok("строка осталась той же и помечена по-новому",
+      $("index-list").querySelector("li.folder > ul > li") === li && /по ссылке/.test(li.textContent),
+      li.textContent);
+    ok("фокус после смены режима — на кнопке строки", w.document.activeElement === trigger,
+      w.document.activeElement.tagName);
+
+    // Удаление — вопросом в том же меню, а не окном браузера.
+    click(w, trigger);
+    click(w, menuItem(w, /^Удалить$/));
+    const ask = w.document.getElementById("row-menu").textContent;
+    ok("удаление спрошено, и в вопросе имя документа", /Да, удалить «Лаба»/.test(ask), ask);
+    ok("рядом стоит отмена", /Отмена/.test(ask), ask);
+    click(w, menuItem(w, /^Отмена/));
+    ok("после отмены документ не удаляли",
+      !stub.calls.some((c) => c.key === "DELETE /api/docs/deniz/lab1"),
+      JSON.stringify(stub.calls.map((c) => c.key)));
+    ok("сказано, что документ на месте", /на месте/.test($("status").textContent), $("status").textContent);
   }
 
   // --- 8б. Список документов — деревом: папка заголовком, файлы под ней ------

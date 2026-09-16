@@ -270,6 +270,62 @@ a:focus-visible {
    настоящей: доска в облаке рассыпалась в столбик фигур, пока копию не
    починили. Не возвращаем. */
 
+/* --- Меню действий над документом ---
+   Кнопка «Действия» стоит в строке списка, само меню — поверх страницы, у
+   кнопки или у курсора. Позицию считает app.js (placeRowMenu): меню fixed, а
+   left/top приходят из скрипта, поэтому здесь их нет. */
+.menu-trigger {
+  margin-left: 0.5rem;
+  padding: 0.15rem 0.6rem;
+  font-size: 0.95rem;
+}
+
+#row-menu {
+  position: fixed;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  min-width: 14rem;
+  max-width: 24rem;
+  padding: 0.4rem;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+}
+
+/* Пункты меню — не кнопки-призывы: цвет кнопки здесь читался бы как «нажми
+   меня» на каждом пункте. Подсветка появляется на том, где стоит фокус, —
+   и по ней же видно, куда вели стрелки. */
+#row-menu button {
+  align-self: stretch;
+  padding: 0.35rem 0.6rem;
+  text-align: left;
+  color: var(--text);
+  background: transparent;
+  border-radius: 4px;
+}
+
+#row-menu button:focus,
+#row-menu button:focus-visible {
+  color: var(--bg);
+  background: var(--accent);
+  outline-offset: -2px;
+}
+
+/* Выбранный режим доступа: галочка и её отсутствие — единственная разница
+   между тремя одинаковыми строками, поэтому она должна быть слышна сразу. */
+#row-menu button[role="menuitemradio"][aria-checked="true"]::before {
+  content: "• ";
+}
+
+#row-menu [role="separator"] {
+  height: 1px;
+  margin: 0.25rem 0.4rem;
+  background: var(--border);
+}
+
 /* Кнопка «Указать на строку документа» ездит по краю экрана: человек читает
    документ внизу страницы, а форма комментария вышел за кадр — до кнопки
    пришлось бы листать обратно, теряя строку. Полосу прокрутки она не

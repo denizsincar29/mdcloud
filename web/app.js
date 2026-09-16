@@ -21,9 +21,8 @@ const state = {
   doc: null,
   renderers: null,
   config: null, // что сервер рассказал про регистрацию
-  invites: [],
+  accounts: [], // учётные записи — их видит хозяин облака
   tokens: [],
-  invite: "", // код из ссылки-приглашения, с которой пришёл человек
 };
 
 const el = (id) => document.getElementById(id);
@@ -474,10 +473,10 @@ function paintCommentBody(into, text) {
 
 // ------------------------------------------------------------------ шапка
 
-// Учётная запись — меню, а не ряд кнопок: «Выйти» рядом с «Приглашениями»
+// Учётная запись — меню, а не ряд кнопок: «Выйти» рядом с «Учётными записями»
 // слишком легко нажать мимо. Кнопка в шапке раскрывает список, Escape и клик
 // в стороне его закрывают, при раскрытии фокус сразу встаёт на первый пункт —
-// чтец экрана читает «меню раскрыто, Приглашения, кнопка».
+// чтец экрана читает «меню раскрыто, Учётные записи, кнопка».
 function accountMenu() {
   return el("account-menu");
 }
@@ -511,33 +510,29 @@ function paintAuth() {
   toggle.textContent = logged ? "Учётная запись: " + state.user.username : "Учётная запись";
   el("login-toggle").hidden = logged;
   el("tokens-toggle").hidden = !logged;
-  el("invites-toggle").hidden = !(logged && state.user.is_admin);
+  el("admin-toggle").hidden = !(logged && state.user.is_admin);
   if (!logged) closeAccountMenu();
 }
 
 // ------------------------------------------------------------------ экраны
 
-const SCREENS = ["login", "register", "index", "doc", "invites", "tokens"];
+const SCREENS = ["login", "register", "index", "doc", "admin", "tokens"];
 
 function show(id) {
   for (const name of SCREENS) el(name).hidden = name !== id;
 }
 
-// registration — что можно рассказать про регистрацию по ответу /api/config:
-// первый (место хозяина свободно), открытая, по приглашению или закрыта.
+// registration — что можно рассказать про регистрацию по ответу /api/config.
+// Открыта она всегда, разница одна: свободно ли место хозяина. Если настройки
+// не доехали, считаем открытой — прятать форму из-за молчания сервера глупо.
 function registration() {
-  return (state.config && state.config.registration) || "closed";
+  return (state.config && state.config.registration) || "open";
 }
 
 function paintRegister() {
-  const mode = registration();
-  el("register-toggle").hidden = mode === "closed";
-  el("register-hint").textContent = {
-    first: "Вы первый — регистрируйтесь, и облако станет вашим: приглашения выдаёте вы.",
-    open: "Регистрация открыта для всех.",
-    invite: "Регистрация по приглашению: откройте ссылку, которую вам прислали, — форма откроется сама.",
-    closed: "Регистрация закрыта. Попросите приглашение у хозяина облака.",
-  }[mode];
+  el("register-hint").textContent = registration() === "first"
+    ? "Вы первый — регистрируйтесь, и облако станет вашим: учётные записи ведёте вы."
+    : "Регистрация открыта — заводите аккаунт.";
 }
 
 async function openLogin(message) {
@@ -546,21 +541,18 @@ async function openLogin(message) {
   paintRegister();
   // На первом запуске логиниться некому — сразу к регистрации.
   if (registration() === "first") {
-    await openRegister("");
+    await openRegister();
     return;
   }
   el("login-name").focus();
 }
 
-// openRegister показывает форму регистрации. Приглашение приходит ссылкой
-// вида mdcloud.denizsincar.ru/#invite=КОД — фрагмент адреса на сервер не
-// уходит, поэтому в логах он не осядет. Отдельного поля для кода нет: человеку
-// нечего вставлять руками, он просто открывает ссылку.
-async function openRegister(invite) {
+// openRegister показывает форму регистрации. Пропусков в облако нет: форма
+// открыта всякому, кто до неё дошёл.
+async function openRegister() {
   show("register");
   status("");
   paintRegister();
-  state.invite = invite || "";
   if (!state.config) {
     try {
       state.config = await api("/api/config");
@@ -576,8 +568,13 @@ async function openRegister(invite) {
 // заголовком над ним. Ссылка остаётся ссылкой, но нажать можно и мимо её
 // текста: так до пункта доходит чтец экрана, который в режиме обзора
 // попадает на пункт списка, а не на ссылку внутри него.
+//
+// У каждой строки есть кнопка «Действия» и меню на ней (см. rowMenu ниже):
+// и то и другое — только вошедшему. Не вошедшему команд предлагать нечего,
+// и перехватывать у него меню браузера незачем — пусть будет родное.
 function docRow(owner, doc, folder) {
   const li = document.createElement("li");
+  li.tabIndex = -1; // куда вернётся фокус после закрытия меню действий
   const a = document.createElement("a");
   a.href = docHref(owner, doc.path, doc.slug);
   const leaf = folder === "/" ? doc.path : doc.path.slice(folder.length + 1);
@@ -585,13 +582,13 @@ function docRow(owner, doc, folder) {
   li.append(a);
   // В списке помечаем всё, что не открыто всем: хозяин должен отличать
   // приватные документы от «по ссылке» — иначе непонятно, какой адрес можно
-  // называть, а какой нет.
-  if (doc.visibility !== "public") {
-    const mark = document.createElement("span");
-    mark.className = "meta";
-    mark.textContent = " — " + visLabel(doc.visibility);
-    li.append(mark);
-  }
+  // называть, а какой нет. Метка живёт отдельным узлом: меню действий меняет
+  // режим на месте, не перерисовывая список, и ему есть что поправить.
+  const mark = document.createElement("span");
+  mark.className = "meta doc-mark";
+  mark.hidden = doc.visibility === "public";
+  mark.textContent = " — " + visLabel(doc.visibility);
+  li.append(mark);
   // Документ на срок помечаем в списке: иначе о нём не вспомнить, а он возьмёт
   // и пропадёт — вместе с тем, что в нём было написано.
   if (doc.expires_at) {
@@ -600,11 +597,391 @@ function docRow(owner, doc, folder) {
     until.textContent = " — до " + untilText(doc.expires_at);
     li.append(until);
   }
+  if (state.user) {
+    li.append(rowMenuButton(owner, doc, li));
+    rowContextMenu(owner, doc, li);
+  }
   li.addEventListener("click", (event) => {
-    if (event.target.closest("a")) return; // по ссылке — обычный переход
+    if (event.target.closest("a") || event.target.closest("button")) return;
     a.click();
   });
   return li;
+}
+
+// ------------------------------------------------------ меню действий (APG)
+
+// Меню действий над документом сделано по паттерну WAI-ARIA Menu, а не по
+// disclosure. Разница не в разметке, а в обещании: пункты меню — команды
+// (переименовать, дублировать, удалить), и от такого списка чтец экрана ждёт
+// стрелок, одной остановки Tab и Escape с возвратом фокуса. Disclosure с
+// кнопками обещает обратное — обычный Tab по списку, — и подмена одного
+// другим читается как «кнопки, кнопки, кнопки» без единой подсказки, что тут
+// вообще-то меню.
+//
+// Экзотики вроде role="toolbar" поверх меню не нужно: на роли menu и menuitem
+// NVDA сама включает режим форм — это подтверждает разработчик NVDA в их
+// трекере (nvaccess/nvda#11143: «if NVDA is switching to focus mode, that
+// means there is a role (menu, menuitem…) that needs to be treated as an
+// interactive control which implements its own keyboard navigation»), поэтому
+// стрелки доходят до страницы штатно.
+//
+// Меню одно на страницу: открытое живёт в rowMenu, закрытое снимается с
+// документа целиком, а не прячется атрибутом.
+
+let rowMenu = null; // { root, trigger, returnTo, buttons, items }
+
+function rowMenuOpen() {
+  return Boolean(rowMenu);
+}
+
+// closeRowMenu снимает меню. Фокус возвращается туда, откуда меню позвали:
+// кнопке «Действия» или самой строке, если меню открыли правым кликом по ней.
+function closeRowMenu({ focus = false } = {}) {
+  if (!rowMenu) return;
+  const menu = rowMenu;
+  rowMenu = null;
+  menu.root.remove();
+  if (menu.trigger) menu.trigger.setAttribute("aria-expanded", "false");
+  const back = menu.returnTo || menu.trigger;
+  if (focus && back && back.focus) back.focus();
+}
+
+// menuTrigger — кнопка «Действия» в строке. Она же точка входа с клавиатуры:
+// до неё доходит Tab, а Applications и Shift+F10 на ней открывают то же меню.
+// Подпись включает, чья это строка: иначе чтец экрана читает двадцать
+// одинаковых «Действия» и не понимает, к какому документу они относятся.
+// Кнопкой дело не ограничивается — то же меню открывают правым кликом и
+// Applications на самой строке (см. rowContextMenu).
+function menuTrigger(label, onOpen) {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "menu-trigger";
+  btn.textContent = "Действия";
+  btn.setAttribute("aria-haspopup", "menu");
+  btn.setAttribute("aria-expanded", "false");
+  btn.setAttribute("aria-label", label);
+  btn.addEventListener("click", () => onOpen({ trigger: btn, returnTo: btn }));
+  btn.addEventListener("contextmenu", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    onOpen({ trigger: btn, returnTo: btn });
+  });
+  return btn;
+}
+
+function rowMenuButton(owner, doc, row) {
+  return menuTrigger("Действия: " + (doc.title || doc.path), (ctx) => {
+    openRowMenu(owner, doc, { ...ctx, row });
+  });
+}
+
+// rowContextMenu — Applications, Shift+F10 и правый клик по строке открывают
+// наше меню вместо браузерного. Пункты, которых человек этим лишается,
+// внутри есть: «Открыть в новом окне» и «Скопировать адрес».
+function rowContextMenu(owner, doc, row) {
+  row.addEventListener("contextmenu", (event) => {
+    event.preventDefault();
+    openRowMenu(owner, doc, {
+      trigger: row.querySelector(".menu-trigger"),
+      returnTo: row,
+      row,
+      point: { x: event.clientX, y: event.clientY },
+    });
+  });
+}
+
+// rowMenuItems — что вообще можно сделать с этой строкой. Чужой документ
+// (из «Со мной поделились» и из чужого публичного списка) — только читать;
+// над своим — всё.
+function rowMenuItems(owner, doc, ctx) {
+  const href = docHref(owner, doc.path, doc.slug);
+  const mine = Boolean(state.user && state.user.username === owner);
+  const items = [
+    { label: "Открыть", run: () => { location.href = href; } },
+  ];
+  if (mine) {
+    items.push({ label: "Редактировать", run: () => openInEditor(owner, doc.path) });
+  }
+  items.push(
+    { label: "Открыть в новом окне", run: () => window.open(href, "_blank", "noopener") },
+    { label: "Скопировать адрес", run: () => copyAddress(location.origin + href) },
+  );
+  if (!mine) return items;
+
+  items.push(
+    { separator: true },
+    {
+      role: "menuitemradio",
+      label: "Приватный — читаете вы и те, кому отправили",
+      checked: doc.visibility !== "link" && doc.visibility !== "public",
+      run: () => applyVisibility(owner, doc, ctx, "private"),
+    },
+    {
+      role: "menuitemradio",
+      label: "По ссылке — кто знает адрес",
+      checked: doc.visibility === "link",
+      run: () => applyVisibility(owner, doc, ctx, "link"),
+    },
+    {
+      role: "menuitemradio",
+      label: "Публичный — виден всем в списке документов",
+      checked: doc.visibility === "public",
+      run: () => applyVisibility(owner, doc, ctx, "public"),
+    },
+    { separator: true },
+    { label: "Переименовать", run: () => openRowAction(owner, doc, ctx, "rename-toggle") },
+    { label: "Дублировать", run: () => duplicateDoc(owner, doc) },
+    { label: "Срок хранения", run: () => openRowAction(owner, doc, ctx, "expiry-toggle") },
+    { label: "Отправить человеку", run: () => openRowAction(owner, doc, ctx, "share-toggle") },
+    { separator: true },
+    { label: "Удалить", run: () => askDelete(owner, doc, ctx) },
+  );
+  return items;
+}
+
+function openRowMenu(owner, doc, ctx) {
+  openMenu(ctx.items || rowMenuItems(owner, doc, ctx), {
+    ...ctx,
+    ariaLabel: "Действия с документом " + (doc.title || doc.path),
+  });
+}
+
+// openMenu — построить и раскрыть меню: пункты, клавиши, фокус. Одно на весь
+// сайт: меню документа и меню учётной записи отличаются только списком пунктов,
+// и расходиться в поведении им незачем. at — либо кнопка-источник, либо точка,
+// где щёлкнули; фокус сразу встаёт на первый пункт, иначе чтец экрана не узнает,
+// что меню вообще раскрылось.
+function openMenu(items, ctx) {
+  closeRowMenu();
+  const root = document.createElement("div");
+  root.id = "row-menu";
+  root.setAttribute("role", "menu");
+  root.setAttribute("aria-label", ctx.ariaLabel || "Действия");
+  const buttons = [];
+  for (const item of items) {
+    if (item.separator) {
+      const sep = document.createElement("div");
+      sep.setAttribute("role", "separator");
+      root.append(sep);
+      continue;
+    }
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.setAttribute("role", item.role || "menuitem");
+    btn.textContent = item.label;
+    if (item.checked) btn.setAttribute("aria-checked", "true");
+    if (item.disabled) btn.setAttribute("aria-disabled", "true");
+    btn.tabIndex = -1;
+    btn.addEventListener("click", () => {
+      if (item.disabled) return;
+      closeRowMenu({ focus: true });
+      item.run();
+    });
+    buttons.push(btn);
+    root.append(btn);
+  }
+
+  // Клавиши меню: стрелки по кругу, Home и End по краям, Escape закрывает и
+  // возвращает фокус, Tab просто уводит дальше — меню при этом закрывается.
+  // Буква переводит к пункту на неё: пунктов много, стрелками ходить долго.
+  let typed = "";
+  let typedAt = 0;
+  root.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeRowMenu({ focus: true });
+      return;
+    }
+    if (event.key === "Tab") {
+      closeRowMenu({ focus: true }); // дальше браузер сам уводит фокус по Tab
+      return;
+    }
+    const step = { ArrowDown: 1, ArrowUp: -1 }[event.key];
+    if (step) {
+      event.preventDefault();
+      menuFocus(buttons, menuIndex(buttons) + step);
+      return;
+    }
+    if (event.key === "Home" || event.key === "End") {
+      event.preventDefault();
+      menuFocus(buttons, event.key === "Home" ? 0 : buttons.length - 1);
+      return;
+    }
+    if (event.key.length === 1 && !event.ctrlKey && !event.altKey && !event.metaKey) {
+      const now = Date.now();
+      typed = now - typedAt > 800 ? event.key : typed + event.key;
+      typedAt = now;
+      const hit = buttons.find((b) => b.textContent.toLowerCase().startsWith(typed.toLowerCase()));
+      if (hit) menuFocus(buttons, buttons.indexOf(hit));
+    }
+  });
+
+  // Меню закрывается, когда фокус ушёл из него, и когда щёлкнули мимо.
+  root.addEventListener("focusout", () => {
+    setTimeout(() => {
+      if (rowMenu && rowMenu.root === root && !root.contains(document.activeElement)) {
+        closeRowMenu();
+      }
+    }, 0);
+  });
+  root.addEventListener("click", (event) => event.stopPropagation());
+
+  rowMenu = { root, trigger: ctx.trigger, returnTo: ctx.returnTo, buttons, items };
+  // Ставим меню, пока оно невидимо: у только что вставленного узла есть
+  // размер, но ещё нет места на экране, и мерить его надо до показа, иначе
+  // оно мигнёт в левом верхнем углу.
+  root.style.visibility = "hidden";
+  document.body.append(root);
+  placeRowMenu(root, ctx);
+  root.style.visibility = "";
+  if (ctx.trigger) ctx.trigger.setAttribute("aria-expanded", "true");
+  menuFocus(buttons, 0);
+}
+
+// placeRowMenu ставит меню у кнопки или у курсора и не даёт ему уехать за
+// край окна: пункт, до которого не добраться, — тот же отсутствующий пункт.
+function placeRowMenu(root, ctx) {
+  const box = root.getBoundingClientRect();
+  let x;
+  let y;
+  if (ctx.point) {
+    x = ctx.point.x;
+    y = ctx.point.y;
+  } else {
+    const rect = ctx.trigger ? ctx.trigger.getBoundingClientRect() : { left: 8, top: 8, bottom: 8 };
+    x = rect.left;
+    y = rect.bottom + 4;
+    // Под кнопкой не поместилось — раскрываем вверх, а не за нижний край.
+    if (y + box.height > window.innerHeight - 8 && rect.top - box.height - 4 > 8) {
+      y = rect.top - box.height - 4;
+    }
+  }
+  x = Math.max(8, Math.min(x, window.innerWidth - box.width - 8));
+  y = Math.max(8, Math.min(y, window.innerHeight - box.height - 8));
+  root.style.left = x + "px";
+  root.style.top = y + "px";
+}
+
+function menuIndex(buttons) {
+  return buttons.indexOf(document.activeElement);
+}
+
+// menuFocus ставит фокус на пункт по кругу и ведёт за ним tabindex: в меню
+// одна остановка Tab, а не столько, сколько пунктов.
+function menuFocus(buttons, index) {
+  const live = buttons.filter((b) => b.getAttribute("aria-disabled") !== "true");
+  if (!live.length) return;
+  const target = live[((index % live.length) + live.length) % live.length];
+  for (const b of buttons) b.tabIndex = b === target ? 0 : -1;
+  target.focus();
+}
+
+// copyAddress кладёт адрес в буфер. В буфер не пустили — говорим адрес вслух:
+// он всё равно длинный и диктовать его придётся, но потерять его молча нельзя.
+async function copyAddress(url) {
+  try {
+    await navigator.clipboard.writeText(url);
+    status("Адрес скопирован: " + url);
+  } catch {
+    status("Скопировать не вышло — вот адрес: " + url);
+  }
+}
+
+// applyVisibility меняет режим доступа прямо из списка: документ тут же
+// помечается новым словом, а страницу не перерисовываем — иначе фокус уехал
+// бы в начало списка, и человек потерял бы место, с которого начал.
+async function applyVisibility(owner, doc, ctx, next) {
+  if (doc.visibility === next) {
+    status("Доступ не менялся — " + visLabel(next) + ".");
+    return;
+  }
+  try {
+    const saved = await api(apiPath(owner, doc.path), { method: "PUT", body: { visibility: next } });
+    doc.visibility = saved.visibility;
+    const mark = ctx.row && ctx.row.querySelector(".doc-mark");
+    if (mark) {
+      mark.textContent = " — " + visLabel(saved.visibility);
+      mark.hidden = saved.visibility === "public";
+    }
+    status(visWords[saved.visibility] || "Доступ сохранён.");
+  } catch (err) {
+    fail(err);
+  }
+}
+
+// openRowAction уводит на страницу документа и раскрывает на ней нужную форму:
+// переименование, срок и отправка живут там, и второй их копии в списке не
+// нужно. Адрес страницы меняется вместе с переходом — иначе F5 вернул бы
+// человеку список, с которого он пришёл.
+async function openRowAction(owner, doc, ctx, toggleId) {
+  const href = docHref(owner, doc.path, doc.slug);
+  history.pushState(null, "", href);
+  await openDoc(owner, doc.path);
+  const toggle = el(toggleId);
+  if (!toggle.hidden) toggle.click();
+}
+
+// duplicateDoc делает копию рядом с оригиналом. Имя не спрашиваем: копия
+// получает адрес с «-копия» на конце, а переименовать её можно тут же, из её
+// же меню. Спросить имя значило бы показать поле посреди списка — и потерять
+// место, где человек стоял.
+async function duplicateDoc(owner, doc) {
+  status("Делаю копию…");
+  try {
+    const full = await api(apiPath(owner, doc.path));
+    const body = {
+      title: (doc.title || doc.path) + " (копия)",
+      content: full.content,
+      visibility: doc.visibility,
+      comments_on: doc.comments_on,
+      comments_require_auth: doc.comments_require_auth,
+    };
+    let copy = null;
+    for (let n = 1; n <= 20 && !copy; n++) {
+      const path = doc.path + (n === 1 ? "-копия" : "-копия-" + n);
+      try {
+        copy = await api("/api/docs", { method: "POST", body: { ...body, path } });
+      } catch (err) {
+        if (err.status !== 409) throw err; // 409 — адрес занят, берём следующий
+      }
+    }
+    if (!copy) {
+      status("Не нашёл свободного адреса для копии — переименуйте оригинал и повторите.");
+      return;
+    }
+    await openIndex(owner);
+    status("Копия готова: " + docAddress(copy));
+  } catch (err) {
+    fail(err);
+  }
+}
+
+// askDelete спрашивает подтверждение тем же меню, а не окном браузера: окно
+// чтец экрана читает через силу, а тут подтверждение — такой же пункт меню,
+// как всё остальное, и «Отмена» рядом.
+function askDelete(owner, doc, ctx) {
+  const title = doc.title || doc.path;
+  openRowMenu(owner, doc, {
+    ...ctx,
+    items: [
+      { label: "Да, удалить «" + title + "»", run: () => deleteDoc(owner, doc) },
+      { label: "Отмена", run: () => status("Документ на месте.") },
+    ],
+  });
+}
+
+async function deleteDoc(owner, doc) {
+  try {
+    await api(apiPath(owner, doc.path), { method: "DELETE" });
+    if (state.doc && state.doc.path === doc.path && state.doc.owner === owner) {
+      state.doc = null;
+      history.replaceState(null, "", "/" + encodeURIComponent(owner));
+    }
+    if (state.user && state.user.username === owner) await openIndex(owner);
+    status("Документ удалён: " + owner + "/" + doc.path);
+  } catch (err) {
+    fail(err);
+  }
 }
 
 async function openIndex(owner) {
@@ -676,6 +1053,7 @@ async function paintShared(mine) {
   }
   for (const doc of data.docs) {
     const li = document.createElement("li");
+    li.tabIndex = -1;
     const a = document.createElement("a");
     a.href = docHref(doc.owner, doc.path, doc.slug);
     a.textContent = (doc.title || doc.path) + " — от " + doc.owner;
@@ -686,8 +1064,15 @@ async function paintShared(mine) {
       until.textContent = " — до " + untilText(doc.expires_at);
       li.append(until);
     }
+    // Меню и здесь: чужой документ команд не даёт, но «открыть в новом окне»
+    // и «скопировать адрес» нужны ровно так же, а правый клик по строке всё
+    // равно отбирает у браузера его меню.
+    if (state.user) {
+      li.append(rowMenuButton(doc.owner, doc, li));
+      rowContextMenu(doc.owner, doc, li);
+    }
     li.addEventListener("click", (event) => {
-      if (event.target.closest("a")) return;
+      if (event.target.closest("a") || event.target.closest("button")) return;
       a.click();
     });
     list.append(li);
@@ -822,50 +1207,156 @@ async function loadComments(owner, doc) {
   form.dataset.base = base;
 }
 
-// ------------------------------------------------------------------ приглашения
+// ------------------------------------------------------- учётные записи
 
-async function openInvites() {
-  show("invites");
+// Учётные записи ведёт хозяин облака. Регистрация открыта всем, поэтому этот
+// список — единственное место, где видно, кто пришёл; отсюда же учётку убирают.
+// Строки устроены как в списке документов и меню на них то же самое: один
+// способ делать дела на весь сайт, а не два разных.
+async function openAdmin() {
+  show("admin");
   status("");
-  const data = await api("/api/invites");
-  state.invites = data.invites || [];
-  const list = el("invites-list");
+  await paintAccounts();
+  el("main").focus();
+}
+
+async function paintAccounts() {
+  const data = await api("/api/admin/users");
+  state.accounts = data.users || [];
+  const list = el("accounts-list");
   list.replaceChildren();
-  for (const inv of state.invites) {
-    const li = document.createElement("li");
-    const name = inv.note ? inv.note : "без пометки";
-    const when = new Date(inv.expires_at).toLocaleDateString("ru-RU");
-    const head = document.createElement("p");
-    head.textContent = inv.state === "used"
-      ? `${name} — использовано: ${inv.used_by || "кто-то"}, ${new Date(inv.used_at).toLocaleDateString("ru-RU")}`
-      : inv.state === "expired"
-        ? `${name} — просрочено ${when}`
-        : `${name} — действует до ${when}`;
-    li.append(head);
-    if (inv.state !== "used") {
-      const del = document.createElement("button");
-      del.type = "button";
-      del.textContent = `Отозвать приглашение ${name}`;
-      del.addEventListener("click", async () => {
-        try {
-          await api("/api/invites/" + inv.id, { method: "DELETE" });
-          await openInvites();
-          status("Приглашение отозвано.");
-        } catch (err) {
-          fail(err);
-        }
-      });
-      li.append(del);
-    }
-    list.append(li);
-  }
-  if (!state.invites.length) {
+  for (const acc of state.accounts) list.append(accountRow(acc));
+  if (!state.accounts.length) {
     const li = document.createElement("li");
     li.className = "meta";
-    li.textContent = "Приглашений пока нет.";
+    li.textContent = "Аккаунтов пока нет.";
     list.append(li);
   }
-  el("main").focus();
+}
+
+// plural — русские числительные: «1 документ», «2 документа», «5 документов».
+// Список читают голосом, и «2 документов» на слух звучит как ошибка.
+function plural(n, one, few, many) {
+  const ten = n % 10;
+  const hundred = n % 100;
+  if (ten === 1 && hundred !== 11) return one;
+  if (ten >= 2 && ten <= 4 && (hundred < 12 || hundred > 14)) return few;
+  return many;
+}
+
+// accountLine — строка учётной записи одной фразой: чтец экрана читает её
+// целиком, и по ней должно быть понятно всё, что решает судьбу аккаунта, —
+// кто это, хозяин ли, сколько написал и заходил ли вообще.
+function accountLine(acc) {
+  const since = new Date(acc.created_at).toLocaleDateString("ru-RU");
+  const docs = acc.docs
+    ? acc.docs + " " + plural(acc.docs, "документ", "документа", "документов")
+    : "документов нет";
+  const seen = acc.last_login
+    ? "заходил " + new Date(acc.last_login).toLocaleString("ru-RU")
+    : "ни разу не заходил";
+  const role = acc.is_admin ? "хозяин облака" : "аккаунт";
+  return (acc.me ? acc.username + " — это вы, " : acc.username + " — ") +
+    role + ", заведён " + since + ", " + docs + ", " + seen;
+}
+
+function accountRow(acc) {
+  const li = document.createElement("li");
+  li.tabIndex = -1; // куда вернётся фокус после закрытия меню действий
+  const head = document.createElement("p");
+  head.textContent = accountLine(acc);
+  li.append(head);
+  li.append(menuTrigger("Действия с учётной записью " + acc.username, (ctx) => {
+    openAccountRowMenu(acc, { ...ctx, row: li });
+  }));
+  li.addEventListener("contextmenu", (event) => {
+    event.preventDefault();
+    openAccountRowMenu(acc, {
+      trigger: li.querySelector(".menu-trigger"),
+      returnTo: li,
+      row: li,
+      point: { x: event.clientX, y: event.clientY },
+    });
+  });
+  return li;
+}
+
+// accountMenuItems — что можно сделать с учётной записью. Себя не удаляют и не
+// разжаловывают: хозяин в облаке должен остаться, и держится это ровно на этом
+// отказе. Пункты про себя не прячем, а показываем неактивными — иначе человек
+// ищет их и не понимает, почему их нет.
+function accountMenuItems(acc) {
+  const items = [];
+  if (acc.is_admin) {
+    items.push(acc.me
+      ? { label: "Себя разжаловать нельзя", disabled: true }
+      : { label: "Разжаловать — перестанет вести учётные записи", run: () => setAccountAdmin(acc, false) });
+  } else {
+    items.push({ label: "Сделать хозяином — сможет вести учётные записи", run: () => setAccountAdmin(acc, true) });
+  }
+  items.push(
+    { label: "Выгнать — закрыть все входы и отозвать ключи", run: () => kickAccount(acc) },
+    { separator: true },
+    acc.me
+      ? { label: "Свою учётную запись удалить нельзя", disabled: true }
+      : { label: "Удалить учётную запись — со всем, что человек написал", run: () => askDeleteAccount(acc) },
+  );
+  return items;
+}
+
+function openAccountRowMenu(acc, ctx) {
+  openMenu(ctx.items || accountMenuItems(acc), {
+    ...ctx,
+    ariaLabel: "Действия с учётной записью " + acc.username,
+  });
+}
+
+async function setAccountAdmin(acc, admin) {
+  try {
+    await api("/api/admin/users/" + acc.id + "/admin", { method: "POST", body: { admin } });
+    await paintAccounts();
+    status(admin
+      ? acc.username + " теперь хозяин облака."
+      : acc.username + " больше не хозяин.");
+  } catch (err) {
+    fail(err);
+  }
+}
+
+async function kickAccount(acc) {
+  try {
+    const out = await api("/api/admin/users/" + acc.id + "/logout", { method: "POST" });
+    status(acc.username + ": закрыто входов — " + out.sessions + ", отозвано ключей — " + out.tokens + ".");
+  } catch (err) {
+    fail(err);
+  }
+}
+
+// askDeleteAccount спрашивает подтверждение тем же меню, а не окном браузера:
+// удаление уносит всё написанное и обратной дороги нет, а окно чтец экрана
+// читает через силу. «Отмена» стоит рядом и никуда не девается.
+function askDeleteAccount(acc, ctx) {
+  openAccountRowMenu(acc, {
+    ...ctx,
+    items: [
+      { label: "Да, удалить " + acc.username + " — вместе с документами", run: () => deleteAccount(acc) },
+      { label: "Отмена", run: () => status("Учётная запись на месте.") },
+    ],
+  });
+}
+
+async function deleteAccount(acc) {
+  try {
+    await api("/api/admin/users/" + acc.id, { method: "DELETE" });
+    await paintAccounts();
+    // Список перерисован — от прежних строк не осталось и следа, поэтому фокус
+    // ставим на первую: так человек снова в списке, а не в неизвестности.
+    const first = el("accounts-list").querySelector("li");
+    if (first && first.focus) first.focus();
+    status("Учётная запись удалена: " + acc.username + ".");
+  } catch (err) {
+    fail(err);
+  }
 }
 
 // ------------------------------------------------------------------ ключи
@@ -938,8 +1429,8 @@ async function render() {
   status("");
   const r = route();
   try {
-    if (location.hash === "#invites" && state.user && state.user.is_admin) {
-      await openInvites();
+    if (location.hash === "#admin" && state.user && state.user.is_admin) {
+      await openAdmin();
       return;
     }
     if (location.hash === "#tokens" && state.user) {
@@ -984,9 +1475,9 @@ el("tokens-toggle").addEventListener("click", () => {
   location.hash = "#tokens";
   render();
 });
-el("invites-toggle").addEventListener("click", () => {
+el("admin-toggle").addEventListener("click", () => {
   closeAccountMenu();
-  location.hash = "#invites";
+  location.hash = "#admin";
   render();
 });
 el("logout").addEventListener("click", async () => {
@@ -1020,7 +1511,7 @@ el("login-form").addEventListener("submit", async (event) => {
   }
 });
 
-el("register-toggle").addEventListener("click", () => openRegister(""));
+el("register-toggle").addEventListener("click", () => openRegister());
 el("register-back").addEventListener("click", () => openLogin(""));
 
 el("register-form").addEventListener("submit", async (event) => {
@@ -1038,17 +1529,13 @@ el("register-form").addEventListener("submit", async (event) => {
       method: "POST",
       body: {
         username: el("register-name").value,
-        email: el("register-mail").value,
         password: el("register-pass").value,
-        invite: state.invite || "",
         consent: true,
       },
     });
     state.user = out.user;
     paintAuth();
     el("register-pass").value = "";
-    // Код во фрагменте больше не нужен — убираем из адреса.
-    if (location.hash.startsWith("#invite=")) history.replaceState(null, "", "/");
     status("Здравствуйте, " + out.user.username + ".");
     await render();
   } catch (err) {
@@ -1056,28 +1543,11 @@ el("register-form").addEventListener("submit", async (event) => {
   }
 });
 
-el("invite-form").addEventListener("submit", async (event) => {
-  event.preventDefault();
-  status("Выписываю приглашение…");
-  try {
-    const out = await api("/api/invites", {
-      method: "POST",
-      body: { note: el("invite-note").value, days: Number(el("invite-days").value) || 0 },
-    });
-    el("invite-note").value = "";
-    await openInvites();
-    // Ссылка показывается один раз: в базе лежит только хеш кода.
-    el("invite-fresh").hidden = false;
-    el("invite-link").value = out.url;
-    status("Ссылка готова — скопируйте её сейчас: потом показать не получится.");
-    el("invite-link").focus();
-    el("invite-link").select();
-  } catch (err) {
-    fail(err);
-  }
+el("admin-refresh").addEventListener("click", () => {
+  paintAccounts().then(() => status("Список обновлён.")).catch(fail);
 });
 
-el("invites-back").addEventListener("click", () => {
+el("admin-back").addEventListener("click", () => {
   location.hash = "";
   render();
 });
@@ -1503,12 +1973,5 @@ el("comment-form").addEventListener("submit", async (event) => {
   }
   paintAuth();
 
-  // Ссылка-приглашение: код едет во фрагменте, поэтому сразу открываем
-  // регистрацию с уже подставленным кодом.
-  const hash = location.hash.slice(1);
-  if (location.pathname === "/" && hash.startsWith("invite=")) {
-    await openRegister(decodeURIComponent(hash.slice("invite=".length)));
-    return;
-  }
   await render();
 })();

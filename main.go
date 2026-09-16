@@ -44,12 +44,14 @@ func main() {
 
 	// Строка про вход: по ней в журнале видно, как настроена кука, — не
 	// приходится лезть в .env, чтобы понять, почему редактор «не видит» вход.
-	registration := "по приглашению"
-	if cfg.AllowRegistration {
-		registration = "открытая"
+	// Про уведомления пишем там же: «тема не задана» — частая причина того,
+	// что о новом человеке никто не узнал.
+	topic := cfg.NtfyTopic
+	if topic == "" {
+		topic = "не задана"
 	}
-	log.Printf("вход: кука %q домен %q secure=%v ttl=%s; регистрация: %s",
-		cfg.CookieName, cfg.CookieDomain, cfg.CookieSecure, cfg.SessionTTL, registration)
+	log.Printf("вход: кука %q домен %q secure=%v ttl=%s; регистрация открыта; ntfy: %s",
+		cfg.CookieName, cfg.CookieDomain, cfg.CookieSecure, cfg.SessionTTL, topic)
 
 	// Протухшие сессии и коды перехода подчищаем сами: таблица маленькая,
 	// но копить в ней хлам незачем.
