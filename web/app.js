@@ -151,7 +151,7 @@ async function renderers() {
     state.renderers = { showdown };
     // Шахматный компонент — тот же, что в mathmd. Доску, фигуры, клавиши и
     // анализ он приносит с собой: страница даёт только тег с fen или pgn.
-    import("https://cdn.jsdelivr.net/gh/denizsincar29/chessjax@v0.8.1/chessjax.js").catch(() => {});
+    import("https://cdn.jsdelivr.net/gh/denizsincar29/chessjax@v0.8.2/chessjax.js").catch(() => {});
   }
   return state.renderers;
 }
@@ -1085,7 +1085,94 @@ async function paintShared(mine) {
   }
 }
 
-async function openDoc(owner, path) {
+// Документ, открытый по своему адресу, показываем в том состоянии, в котором
+// его оставили: раскрытые формы — это место, где человек стоял, и после
+// возвращения из редактора ему нужно то же место, а не список с начала.
+// Считанные правки остаются открытыми прежним поведением, перенос адреса —
+// тоже (см. перенос ниже); обновление из-за края страницы сбрасывает всё.
+let justMoved = false;
+
+// Обновление открытого документа. Возврат из редактора приходит без события:
+// вкладку облака не перезагружают, а показывают снова (и по кнопке «открыть
+// документ в облаке» mathmd делает ровно это). Поэтому спрашиваем сами, но не
+// показом, а обновлением — приход со стороны не должен перебрасывать читателя
+// наверх, туда, где он читает прямо сейчас. `updated_at` не даёт беспокоиться
+// зря: то же число — та же мдшка, и трогать экран нечего.
+//
+// Кому обновляться нельзя, решает состояние экрана: идёт запись, открыта форма
+// или диалог — молчим и ждём следующего раза. Открытая форма не потери: в ней
+// лежат введённые слова, и перерисовать её значит их стереть.
+let refreshTimer = 0;
+
+function docEditorOpen() {
+  return document.visibilityState !== "visible" ||
+    Boolean(document.activeElement && document.activeElement.closest("dialog[open]"));
+}
+
+function formOpen() {
+  for (const form of document.querySelectorAll("#doc form")) {
+    if (!form.hidden) return true;
+  }
+  return false;
+}
+
+function stopRefresh() {
+  clearInterval(refreshTimer);
+  refreshTimer = 0;
+}
+
+function startRefresh(owner, doc) {
+  stopRefresh();
+  if (!doc.can_edit) return; // чужой документ: показом его не обновим, а Ctrl+R всегда под рукой
+  const at = { owner: owner, path: doc.path, updatedAt: doc.updated_at };
+  docRefreshAt = at;
+  refreshTimer = setInterval(refreshTick, 5000);
+}
+
+let docRefreshAt = null;
+let refreshing = false;
+
+async function refreshTick() {
+  const at = docRefreshAt;
+  if (!at) {
+    stopRefresh();
+    return;
+  }
+  // Адрес мог уехать: человек ушёл в список или в другой документ.
+  if (!state.doc || state.doc.path !== at.path || state.doc.owner !== at.owner) {
+    stopRefresh();
+    return;
+  }
+  if (refreshing || docEditorOpen() || formOpen()) return;
+  refreshing = true;
+  try {
+    const doc = await api(apiPath(at.owner, at.path));
+    if (doc.updated_at !== at.updatedAt) {
+      at.updatedAt = doc.updated_at;
+      // Документ удалён, пока он был открыт: показывать его дальше нечего.
+      // Спрашиваем тем же меню, что и удаление, — окно браузера чтец экрана
+      // читает через силу.
+      const gone = !doc.content;
+      await openDoc(at.owner, at.path, { keepPlace: true, silent: true });
+      status(gone
+        ? "Документ изменился или удалён — на экране сейчас то, что лежит в облаке."
+        : "Документ обновлён: его правил кто-то ещё.");
+    }
+  } catch (err) {
+    if (err.status === 404) {
+      status("Документ удалён — обновляю.");
+      stopRefresh();
+      await render();
+    }
+    // остальные беды (связь, сервер) — не повод сыпать сообщениями каждые
+    // пять секунд: попробуем в следующий раз
+  } finally {
+    refreshing = false;
+  }
+}
+
+async function openDoc(owner, path, opts = {}) {
+  const keepPlace = Boolean(opts.keepPlace);
   show("doc");
   const doc = await api(apiPath(owner, path));
   state.doc = doc;
@@ -1136,9 +1223,15 @@ async function openDoc(owner, path) {
   el("rename-toggle").hidden = !doc.can_edit;
   el("expiry-toggle").hidden = !doc.can_edit;
   el("share-toggle").hidden = !doc.can_edit;
-  el("rename-form").hidden = true;
-  el("expiry-form").hidden = true;
-  el("share-form").hidden = true;
+  // Формы раскрытыми не оставляем: документ открывается с чистого листа.
+  // Исключение — тихое обновление на месте: человек читает, и закрывать под
+  // ним форму нельзя, но после переноса адреса форма имени не нужна никому.
+  if (!keepPlace || justMoved) {
+    el("rename-form").hidden = true;
+    el("expiry-form").hidden = true;
+    el("share-form").hidden = true;
+  }
+  justMoved = false;
   // Кому документ уже отправлен — видно сразу, без раскрытия формы: иначе
   // отправка второй раз тому же человеку выглядит как потерянная.
   paintShareList(doc.shared_with || []);
@@ -1150,7 +1243,10 @@ async function openDoc(owner, path) {
   }
 
   await loadComments(owner, doc);
-  el("main").focus();
+  if (!opts.silent) el("main").focus();
+  // Обновление открытого документа — на время, пока он открыт: вкладка живёт
+  // месяцами, а показанный документ устаревает молча.
+  startRefresh(owner, doc);
 }
 
 async function loadComments(owner, doc) {
@@ -1641,6 +1737,10 @@ el("rename-form").addEventListener("submit", async (event) => {
     // Адрес страницы тоже переезжает: иначе F5 вернул бы старую ссылку, и
     // «скопировать адрес» из браузера отдал бы документ по старому пути.
     history.replaceState(null, "", docHref(owner, doc.path, doc.slug));
+    // Документ открывается по адресу в том состоянии, в котором его оставили
+    // (см. openDoc), а переименование — правка: человек нажал «перенести» и
+    // ждёт новое имя на экране, а не форму, раскрытую заново.
+    justMoved = true;
     await openDoc(owner, doc.path);
     status("Документ перенесён: " + docAddress(doc));
   } catch (err) {
