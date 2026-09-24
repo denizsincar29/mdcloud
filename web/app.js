@@ -151,7 +151,7 @@ async function renderers() {
     state.renderers = { showdown };
     // Шахматный компонент — тот же, что в mathmd. Доску, фигуры, клавиши и
     // анализ он приносит с собой: страница даёт только тег с fen или pgn.
-    import("https://cdn.jsdelivr.net/gh/denizsincar29/chessjax@v0.8.2/chessjax.js").catch(() => {});
+    import("https://cdn.jsdelivr.net/gh/denizsincar29/chessjax@v0.8.3/chessjax.js").catch(() => {});
   }
   return state.renderers;
 }
